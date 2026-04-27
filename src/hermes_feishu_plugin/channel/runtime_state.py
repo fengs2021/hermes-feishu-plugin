@@ -30,6 +30,9 @@ class ChatRuntimeState:
     last_card_update_at: float = 0.0
     last_tool_status_update_at: float = 0.0
     last_visible_activity_at: float = 0.0
+    thinking_text: str = ""
+    thinking_started_at: float = 0.0
+    last_thinking_update_at: float = 0.0
     display_text: str = ""
     pending_status_text: str = ""
     heartbeat_status_text: str = ""
@@ -261,6 +264,28 @@ def get_tool_steps(adapter: Any, chat_id: str) -> list[ToolDisplayStep]:
 def get_fallback_tool_lines(adapter: Any, chat_id: str) -> list[str]:
     """Return fallback plain progress lines."""
     return list(get_chat_state(adapter, chat_id).fallback_tool_lines)
+
+
+def remember_thinking_text(adapter: Any, chat_id: str, thinking: str) -> None:
+    """Store accumulated thinking content for a chat."""
+    state = get_chat_state(adapter, chat_id)
+    state.thinking_text = thinking
+    if not state.thinking_started_at:
+        state.thinking_started_at = time.monotonic()
+
+
+def get_thinking_text(adapter: Any, chat_id: str) -> str:
+    """Return accumulated thinking content for a chat."""
+    return str(get_chat_state(adapter, chat_id).thinking_text or "")
+
+
+def get_thinking_elapsed_ms(adapter: Any) -> int | None:
+    """Return elapsed thinking duration in milliseconds."""
+    state_map = getattr(adapter, _CHAT_STATE_ATTR, {})
+    for state in state_map.values():
+        if state.thinking_started_at > 0:
+            return int(max(0.0, time.monotonic() - state.thinking_started_at) * 1000)
+    return None
 
 
 def get_tool_elapsed_ms(adapter: Any, chat_id: str) -> int | None:

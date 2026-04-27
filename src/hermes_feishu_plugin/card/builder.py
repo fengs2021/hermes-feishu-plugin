@@ -12,6 +12,8 @@ from .tool_panels import (
     build_streaming_tool_use_active_panel,
     build_streaming_tool_use_pending_panel,
     build_tool_use_panel,
+    build_streaming_thinking_pending_panel,
+    build_streaming_thinking_active_panel,
     format_elapsed,
 )
 
@@ -68,6 +70,8 @@ def build_streaming_pre_answer_card(
     status_text: str = "",
     heartbeat_text: str = "",
     show_tool_use: bool = True,
+    thinking_text: str = "",
+    thinking_elapsed_ms: int | None = None,
 ) -> dict[str, Any]:
     """Build the official-style CardKit 2.0 pre-answer streaming card."""
     steps = list(tool_steps or [])
@@ -83,6 +87,15 @@ def build_streaming_pre_answer_card(
             if steps
             else build_streaming_tool_use_pending_panel()
         )
+
+    # Add thinking panel if thinking content is available
+    if thinking_text:
+        elements.append(build_streaming_thinking_active_panel(
+            thinking_text,
+            elapsed_ms=thinking_elapsed_ms,
+        ))
+    else:
+        elements.append(build_streaming_thinking_pending_panel())
 
     elements.append(
         {
@@ -139,29 +152,27 @@ def build_streaming_patch_card(
     status_text: str = "",
     heartbeat_text: str = "",
     show_tool_use: bool = True,
+    thinking_text: str = "",
+    thinking_elapsed_ms: int | None = None,
 ) -> dict[str, Any]:
     """Build the IM patch fallback streaming card."""
-    reasoning, answer = split_reasoning_text(text)
     elements: list[dict[str, Any]] = []
     steps = list(tool_steps or [])
 
     if show_tool_use:
         elements.append(build_tool_use_panel(steps, expanded=False) if steps else build_streaming_tool_use_pending_panel())
 
-    if reasoning and not answer:
-        elements.append(
-            {
-                "tag": "markdown",
-                **with_i18n(
-                    "content",
-                    f"💭 **思考中...**\n\n{reasoning}",
-                    f"💭 **Thinking...**\n\n{reasoning}",
-                ),
-                "text_size": "notation",
-            }
-        )
-    elif answer:
-        elements.append({"tag": "markdown", "content": _optimize_markdown_style(answer)})
+    # Add thinking panel
+    if thinking_text:
+        elements.append(build_streaming_thinking_active_panel(
+            thinking_text,
+            elapsed_ms=thinking_elapsed_ms,
+        ))
+    else:
+        elements.append(build_streaming_thinking_pending_panel())
+
+    if text:
+        elements.append({"tag": "markdown", "content": _optimize_markdown_style(text)})
     elif status_text.strip():
         elements.append({"tag": "markdown", "content": _optimize_markdown_style(status_text)})
 
@@ -187,10 +198,14 @@ def build_complete_card(
     is_error: bool = False,
     is_aborted: bool = False,
     show_tool_use: bool = True,
+    thinking_text: str = "",
 ) -> dict[str, Any]:
     """Build the final non-streaming Feishu card."""
     reasoning, answer = split_reasoning_text(text)
     sanitized_reasoning, sanitized_answer = sanitize_text_segments_for_card([reasoning, answer])
+    # If we have thinking_text from runtime_state but no reasoning from text tags, use it
+    if thinking_text and not sanitized_reasoning:
+        sanitized_reasoning = thinking_text
     elements: list[dict[str, Any]] = []
 
     if show_tool_use:

@@ -1,23 +1,23 @@
-"""Early Hermes gateway patch loader.
+"""Hermes Feishu plugin startup hook."""
+import sys
 
-Hermes directory plugins are normally discovered after a Feishu message has
-already entered the gateway.  This tiny startup hook lets the same official
-plugin package apply its Feishu runtime patches before the gateway adds ACK
-reactions or emits lifecycle status messages.
-"""
-
-from __future__ import annotations
-
-import logging
-
-logger = logging.getLogger(__name__)
-
+# Write trace directly to stderr (not buffered)
+sys.__stderr__.write("[HERMES_FEISHU_STARTUP] v2 startup loading...\n")
+sys.__stderr__.flush()
 
 try:
     from .channel.patches import apply_runtime_patches
     from .core.sibling_bootstrap import sync_optional_plugins
-
-    apply_runtime_patches(plugin_name="hermes_feishu_plugin_startup")
+    
+    sys.__stderr__.write("[HERMES_FEISHU_STARTUP] applying patches...\n")
+    sys.__stderr__.flush()
+    result = apply_runtime_patches(plugin_name="hermes_feishu_plugin_startup")
+    sys.__stderr__.write(f"[HERMES_FEISHU_STARTUP] patches applied: {list(result.get('patched', {}).keys())}\n")
+    sys.__stderr__.flush()
     sync_optional_plugins()
+    sys.__stderr__.write("[HERMES_FEISHU_STARTUP] startup complete\n")
+    sys.__stderr__.flush()
 except Exception as exc:
-    logger.debug("hermes_feishu_plugin startup loader skipped: %s", exc)
+    import traceback
+    sys.__stderr__.write(f"[HERMES_FEISHU_STARTUP] FAILED: {exc}\n{traceback.format_exc()}\n")
+    sys.__stderr__.flush()

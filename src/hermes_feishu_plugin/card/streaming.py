@@ -14,11 +14,14 @@ from ..channel.runtime_state import (
     get_generation,
     get_original_card_id,
     get_pending_status_text,
+    get_thinking_elapsed_ms,
+    get_thinking_text,
     get_tool_elapsed_ms,
     remember_card_entity,
     remember_card_message,
     remember_display_text,
     remember_last_flushed_text,
+    remember_thinking_text,
     remember_tool_steps,
 )
 from ..channel.state import get_chat_generation, get_reply_to_message_id
@@ -30,6 +33,7 @@ from .builder import (
     build_complete_card,
     build_streaming_patch_card,
     build_streaming_pre_answer_card,
+    split_reasoning_text,
     to_cardkit2,
 )
 from .cardkit import (
@@ -46,12 +50,18 @@ from .errors import is_card_rate_limit_error, is_card_table_limit_error
 from .flush_controller import FlushController
 from .live_state import current_heartbeat_text, current_progress_text, elapsed_ms, get_card_update_lock, should_show_tool_use, visible_tool_steps
 from .streaming_support import ensure_progress_heartbeat, is_feishu_adapter, resolve_reply_to_message_id, response_ok, strip_cursor
+from .tool_panels import (
+    build_streaming_thinking_active_panel,
+    build_streaming_thinking_pending_panel,
+    THINKING_ELEMENT_ID,
+)
 
 logger = logging.getLogger(__name__)
 
 CARDKIT_UPDATE_INTERVAL_SECONDS = 0.1
 PATCH_UPDATE_INTERVAL_SECONDS = 1.5
 TOOL_STATUS_UPDATE_INTERVAL_SECONDS = 1.5
+THINKING_THROTTLE_SECONDS = 0.3
 
 
 def _resolve_expected_generation(adapter: Any, chat_id: str, owner: Any | None = None) -> int:
@@ -107,6 +117,8 @@ async def _ensure_card_created(
             status_text=status_text,
             heartbeat_text=current_heartbeat_text(adapter, chat_id),
             show_tool_use=should_show_tool_use(adapter, chat_id),
+            thinking_text=get_thinking_text(adapter, chat_id),
+            thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
         )
 
         try:
@@ -151,6 +163,8 @@ async def _ensure_card_created(
             tool_steps=steps,
             status_text=status_text,
             show_tool_use=should_show_tool_use(adapter, chat_id),
+            thinking_text=get_thinking_text(adapter, chat_id),
+            thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
         )
         response = await send_interactive_card(
             adapter,
@@ -233,6 +247,8 @@ async def _perform_answer_flush(adapter: Any, chat_id: str, *, expected_generati
         status_text=get_pending_status_text(adapter, chat_id),
         heartbeat_text=current_heartbeat_text(adapter, chat_id),
         show_tool_use=should_show_tool_use(adapter, chat_id),
+        thinking_text=get_thinking_text(adapter, chat_id),
+        thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
     )
     async with get_card_update_lock(adapter, chat_id):
         response = await patch_interactive_card(adapter, message_id=message_id, card=card)
@@ -338,12 +354,14 @@ async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_gene
         state.flush_controller.complete()
         await state.flush_controller.wait_for_flush()
 
+    thinking_for_card = get_thinking_text(adapter, chat_id)
     complete_card = build_complete_card(
         text=text,
         tool_steps=visible_tool_steps(adapter, chat_id),
         tool_elapsed_ms=get_tool_elapsed_ms(adapter, chat_id),
         elapsed_ms=elapsed_ms(adapter, chat_id),
         show_tool_use=should_show_tool_use(adapter, chat_id),
+        thinking_text=thinking_for_card,
     )
     effective_card_id = get_card_id(adapter, chat_id) or get_original_card_id(adapter, chat_id)
     if effective_card_id:
@@ -388,6 +406,7 @@ async def abort_progress_card(adapter: Any, chat_id: str, reason: str | None = N
         "已收到新消息，上一轮处理已停止，正在处理最新输入。",
         "New message received. The previous turn was stopped, and the latest input is being handled.",
     )
+    thinking_for_abort = get_thinking_text(adapter, chat_id)
     aborted_card = build_complete_card(
         text=text,
         tool_steps=visible_tool_steps(adapter, chat_id),
@@ -395,6 +414,7 @@ async def abort_progress_card(adapter: Any, chat_id: str, reason: str | None = N
         elapsed_ms=elapsed_ms(adapter, chat_id),
         is_aborted=True,
         show_tool_use=should_show_tool_use(adapter, chat_id),
+        thinking_text=thinking_for_abort,
     )
     effective_card_id = get_card_id(adapter, chat_id) or get_original_card_id(adapter, chat_id)
     if effective_card_id:
@@ -424,6 +444,84 @@ async def abort_progress_card(adapter: Any, chat_id: str, reason: str | None = N
     return False
 
 
+async def sync_thinking_card(
+    adapter: Any,
+    chat_id: str,
+    *,
+    expected_generation: int = 0,
+) -> None:
+    """Sync thinking panel in the active card (throttled)."""
+    if expected_generation <= 0:
+        expected_generation = _resolve_expected_generation(adapter, chat_id)
+    if not _generation_matches(adapter, chat_id, expected_generation):
+        return
+    state = get_chat_state(adapter, chat_id)
+    if not state.card_message_id or state.phase in {"completed", "aborted", "terminated"}:
+        return
+
+    thinking_text = get_thinking_text(adapter, chat_id)
+    if not thinking_text:
+        return
+
+    now = asyncio.get_running_loop().time()
+    last = getattr(state, "last_thinking_update_at", 0.0) or 0.0
+    if last > 0 and (now - last) < THINKING_THROTTLE_SECONDS:
+        return
+    state.last_thinking_update_at = now
+
+    active_card_id = get_card_id(adapter, chat_id)
+    if active_card_id:
+        try:
+            thinking_elapsed = get_thinking_elapsed_ms(adapter)
+            thinking_panel = build_streaming_thinking_active_panel(
+                thinking_text,
+                elapsed_ms=thinking_elapsed,
+            )
+            # Build full streaming card with thinking panel embedded
+            full_card = build_streaming_pre_answer_card(
+                text=get_chat_state(adapter, chat_id).display_text or "",
+                tool_steps=visible_tool_steps(adapter, chat_id),
+                tool_elapsed_ms=get_tool_elapsed_ms(adapter, chat_id),
+                status_text=get_pending_status_text(adapter, chat_id),
+                heartbeat_text=current_heartbeat_text(adapter, chat_id),
+                show_tool_use=should_show_tool_use(adapter, chat_id),
+                thinking_text=thinking_text,
+                thinking_elapsed_ms=thinking_elapsed,
+            )
+            async with get_card_update_lock(adapter, chat_id):
+                sequence = advance_card_sequence(adapter, chat_id)
+                await update_card(
+                    adapter,
+                    card_id=active_card_id,
+                    card=full_card,
+                    sequence=sequence,
+                )
+            return
+        except Exception as exc:
+            if is_card_rate_limit_error(exc):
+                return
+            logger.warning("hermes_feishu_plugin thinking CardKit update failed: %s", exc)
+            disable_cardkit_streaming(adapter, chat_id)
+
+    # IM patch fallback
+    if not get_original_card_id(adapter, chat_id):
+        return
+    try:
+        thinking_elapsed = get_thinking_elapsed_ms(adapter)
+        panel = build_streaming_thinking_active_panel(
+            thinking_text,
+            elapsed_ms=thinking_elapsed,
+        )
+        async with get_card_update_lock(adapter, chat_id):
+            response = await patch_interactive_card(
+                adapter,
+                message_id=state.card_message_id,
+                card={"config": {"update_multi": True}, "elements": [panel]},
+            )
+    except Exception as exc:
+        logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
+
+
 def patch_streaming_cards() -> bool:
     """Patch Hermes stream consumer so Feishu uses CardKit-first streaming."""
     import gateway.stream_consumer as stream_consumer
@@ -444,20 +542,20 @@ def patch_streaming_cards() -> bool:
     if getattr(original_send_or_edit, "__hermes_feishu_plugin_wrapped__", False):
         return True
 
-    async def wrapped_send_or_edit(self: Any, text: str) -> None:
+    async def wrapped_send_or_edit(self: Any, text: str, *, finalize: bool = False) -> bool:
         cleaned = self._clean_for_display(text)
         if not cleaned.strip():
-            return
+            return False
 
         if not is_feishu_adapter(self.adapter):
-            return await original_send_or_edit(self, text)
+            return await original_send_or_edit(self, text, finalize=finalize)
         if not should_stream(self.adapter, self.chat_id):
-            return await original_send_or_edit(self, text)
+            return await original_send_or_edit(self, text, finalize=finalize)
 
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
             self._already_sent = True
-            return
+            return False
 
         if should_suppress_status_message(cleaned):
             lines = parse_tool_progress_lines(cleaned)
@@ -470,12 +568,30 @@ def patch_streaming_cards() -> bool:
                     expected_generation=expected_generation,
                 )
             self._already_sent = True
-            return
+            return True
 
         if cleaned == self._last_sent_text:
-            return
+            return True
 
-        visible_text, is_final = strip_cursor(cleaned, self.cfg.cursor)
+        # Extract thinking content and accumulate it
+        reasoning_raw, answer_raw = split_reasoning_text(cleaned)
+        if reasoning_raw:
+            current_thinking = get_thinking_text(self.adapter, self.chat_id)
+            new_thinking = current_thinking + reasoning_raw
+            remember_thinking_text(self.adapter, self.chat_id, new_thinking)
+
+        # Always sync thinking panel if there's stored content (from on_reasoning_delta)
+        # This ensures thinking from the reasoning channel also gets displayed
+        thinking_content = get_thinking_text(self.adapter, self.chat_id)
+        if thinking_content:
+            await sync_thinking_card(
+                self.adapter,
+                self.chat_id,
+                expected_generation=expected_generation,
+            )
+        # Use answer (stripped of thinking tags) as the visible text
+        visible_text, cursor_is_final = strip_cursor(answer_raw, self.cfg.cursor)
+        is_final = finalize or cursor_is_final
         try:
             message_id = await _ensure_card_created(
                 self.adapter,
@@ -485,7 +601,7 @@ def patch_streaming_cards() -> bool:
                 expected_generation=expected_generation,
             )
             if not message_id:
-                return await original_send_or_edit(self, text)
+                return await original_send_or_edit(self, text, finalize=finalize)
 
             self._message_id = message_id
             remember_display_text(self.adapter, self.chat_id, visible_text)
@@ -496,7 +612,7 @@ def patch_streaming_cards() -> bool:
                     visible_text,
                     expected_generation=expected_generation,
                 ):
-                    return await original_send_or_edit(self, text)
+                    return await original_send_or_edit(self, text, finalize=finalize)
             else:
                 await _flush_answer(
                     self.adapter,
@@ -506,12 +622,14 @@ def patch_streaming_cards() -> bool:
 
             self._already_sent = True
             self._last_sent_text = cleaned
+            return True
         except Exception as exc:
             logger.warning("hermes_feishu_plugin CardKit streaming error: %s", exc)
             if not self._message_id:
-                await original_send_or_edit(self, text)
+                return await original_send_or_edit(self, text, finalize=finalize)
             else:
                 self._already_sent = True
+                return False
 
     wrapped_send_or_edit.__hermes_feishu_plugin_wrapped__ = True
     stream_consumer.GatewayStreamConsumer._send_or_edit = wrapped_send_or_edit

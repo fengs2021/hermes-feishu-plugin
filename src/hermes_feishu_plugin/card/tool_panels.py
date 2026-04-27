@@ -224,3 +224,86 @@ def _code_fence(text: str) -> str:
 
 def _escape_tool_markdown(text: str) -> str:
     return re.sub(r"([`*_{}\[\]<>])", r"\\\1", str(text or ""))
+
+
+THINKING_ELEMENT_ID = "reasoning_content"
+
+
+def build_streaming_thinking_pending_panel() -> dict[str, Any]:
+    """Build the collapsed pending thinking panel."""
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "element_id": THINKING_ELEMENT_ID,
+        "header": _thinking_header(zh="💭 思考中", en="💭 Thinking", icon_position="right"),
+        "border": {"color": "grey", "corner_radius": "5px"},
+        "vertical_spacing": "4px",
+        "padding": "8px 8px 8px 8px",
+        "elements": [{"tag": "markdown", "content": "...", "text_size": "notation"}],
+    }
+
+
+def build_streaming_thinking_active_panel(
+    thinking_text: str,
+    *,
+    elapsed_ms: int | None,
+) -> dict[str, Any]:
+    """Build the expanded thinking panel with streaming content."""
+    label = format_elapsed(elapsed_ms) if elapsed_ms else ""
+    zh_title = f"💭 思考中 {label}" if label else "💭 思考中..."
+    en_title = f"💭 Thinking {label}" if label else "💭 Thinking..."
+    display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "element_id": THINKING_ELEMENT_ID,
+        "header": _thinking_header(zh=zh_title, en=en_title, icon_position="right"),
+        "border": {"color": "grey", "corner_radius": "5px"},
+        "vertical_spacing": "4px",
+        "padding": "8px 8px 8px 8px",
+        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+    }
+
+
+def build_thinking_panel(
+    thinking_text: str,
+    *,
+    elapsed_ms: int | None,
+    expanded: bool = False,
+) -> dict[str, Any]:
+    """Build the final thinking collapsible panel."""
+    label = format_elapsed(elapsed_ms) if elapsed_ms else ""
+    zh_title = f"💭 思考了 {label}" if label else "💭 思考"
+    en_title = f"💭 Thought for {label}" if label else "💭 Thought"
+    display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
+    return {
+        "tag": "collapsible_panel",
+        "expanded": expanded,
+        "element_id": THINKING_ELEMENT_ID,
+        "header": _thinking_header(zh=zh_title, en=en_title, icon_position="right"),
+        "border": {"color": "grey", "corner_radius": "5px"},
+        "vertical_spacing": "4px",
+        "padding": "8px 8px 8px 8px",
+        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+    }
+
+
+def _thinking_header(zh: str, en: str, *, icon_position: str) -> dict[str, Any]:
+    return {
+        "title": {
+            "tag": "plain_text",
+            "content": select_text(zh, en),
+            "i18n_content": {"zh_cn": zh, "en_us": en},
+            "text_color": "grey",
+            "text_size": "notation",
+        },
+        "vertical_align": "center",
+        "icon": {
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+            "color": "grey",
+            "size": "16px 16px",
+        },
+        "icon_position": icon_position,
+        "icon_expanded_angle": -180,
+    }
