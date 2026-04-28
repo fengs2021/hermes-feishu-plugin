@@ -522,6 +522,44 @@ async def sync_thinking_card(
         logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
 
 
+_current_feishu_consumer: Any = None
+"""Thread-safe reference to the active Feishu stream consumer.
+
+Set by ``wrapped_send_or_edit`` before each sync to the card and cleared
+afterwards so the reasoning-delta handler knows which chat to target.
+"""
+
+
+def _handle_reasoning_delta(reasoning_text: str) -> None:
+    """Thread-safe handler for reasoning deltas from the agent worker thread.
+
+    Accumulates reasoning text and schedules an async ``sync_thinking_card``
+    on the event loop so the CardKit thinking panel updates in real time.
+    """
+    consumer = _current_feishu_consumer
+    if consumer is None or not reasoning_text:
+        return
+    adapter = getattr(consumer, "adapter", None)
+    chat_id = getattr(consumer, "chat_id", None)
+    if not adapter or not chat_id or not is_feishu_adapter(adapter):
+        return
+    if not should_stream(adapter, chat_id):
+        return
+    try:
+        current = get_thinking_text(adapter, chat_id)
+        remember_thinking_text(adapter, chat_id, current + str(reasoning_text))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.run_coroutine_threadsafe(
+            sync_thinking_card(adapter, chat_id, expected_generation=0),
+            loop,
+        )
+    except Exception:
+        pass
+
+
 def patch_streaming_cards() -> bool:
     """Patch Hermes stream consumer so Feishu uses CardKit-first streaming."""
     import gateway.stream_consumer as stream_consumer
@@ -539,6 +577,26 @@ def patch_streaming_cards() -> bool:
         wrapped_on_delta.__hermes_feishu_plugin_wrapped__ = True
         stream_consumer.GatewayStreamConsumer.on_delta = wrapped_on_delta
 
+    # Hook agent reasoning stream so DeepSeek / MiniMax reasoning_content
+    # deltas flow into the CardKit thinking panel.  The agent fires
+    # _fire_reasoning_delta from its worker thread; we route those into
+    # remember_thinking_text + sync_thinking_card so the collapsible
+    # thinking panel inside the card stays populated.
+    if not getattr(stream_consumer.GatewayStreamConsumer, "__hermes_feishu_reasoning_hooked__", False):
+        try:
+            import run_agent as _run_agent
+        except Exception:
+            logger.warning("hermes_feishu_plugin reasoning hook skipped: cannot import run_agent")
+        else:
+            _original_fire_reasoning = _run_agent.AIAgent._fire_reasoning_delta
+
+            def _patched_fire_reasoning(self: Any, text: str) -> None:
+                _original_fire_reasoning(self, text)
+                _handle_reasoning_delta(text)
+
+            _run_agent.AIAgent._fire_reasoning_delta = _patched_fire_reasoning
+        stream_consumer.GatewayStreamConsumer.__hermes_feishu_reasoning_hooked__ = True
+
     if getattr(original_send_or_edit, "__hermes_feishu_plugin_wrapped__", False):
         return True
 
@@ -551,6 +609,9 @@ def patch_streaming_cards() -> bool:
             return await original_send_or_edit(self, text, finalize=finalize)
         if not should_stream(self.adapter, self.chat_id):
             return await original_send_or_edit(self, text, finalize=finalize)
+
+        global _current_feishu_consumer
+        _current_feishu_consumer = self
 
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
