@@ -227,6 +227,7 @@ def _escape_tool_markdown(text: str) -> str:
 
 
 THINKING_ELEMENT_ID = "reasoning_content"
+THINKING_TEXT_ELEMENT_ID = "thinking_text"
 
 
 def build_streaming_thinking_pending_panel() -> dict[str, Any]:
@@ -239,7 +240,7 @@ def build_streaming_thinking_pending_panel() -> dict[str, Any]:
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": "...", "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": "...", "text_size": "notation"}],
     }
 
 
@@ -261,7 +262,7 @@ def build_streaming_thinking_active_panel(
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": display_text, "text_size": "notation"}],
     }
 
 
@@ -284,7 +285,7 @@ def build_thinking_panel(
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": display_text, "text_size": "notation"}],
     }
 
 

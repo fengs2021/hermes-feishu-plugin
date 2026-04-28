@@ -533,8 +533,10 @@ afterwards so the reasoning-delta handler knows which chat to target.
 def _handle_reasoning_delta(reasoning_text: str) -> None:
     """Thread-safe handler for reasoning deltas from the agent worker thread.
 
-    Accumulates reasoning text and schedules an async ``sync_thinking_card``
-    on the event loop so the CardKit thinking panel updates in real time.
+    Accumulates reasoning text and streams it into the CardKit thinking panel
+    in real time via ``stream_card_content`` on the ``thinking_text`` element.
+    Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
+    is unavailable (IM patch mode).
     """
     consumer = _current_feishu_consumer
     if consumer is None or not reasoning_text:
@@ -547,7 +549,23 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
         return
     try:
         current = get_thinking_text(adapter, chat_id)
-        remember_thinking_text(adapter, chat_id, current + str(reasoning_text))
+        new_thinking = current + str(reasoning_text)
+        remember_thinking_text(adapter, chat_id, new_thinking)
+
+        # Try CardKit content streaming for real-time typewriter effect
+        active_card_id = get_card_id(adapter, chat_id)
+        if active_card_id:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            asyncio.run_coroutine_threadsafe(
+                _stream_thinking_to_card(adapter, chat_id, active_card_id, new_thinking),
+                loop,
+            )
+            return
+
+        # Fallback: full-card update via sync_thinking_card (IM patch mode)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -558,6 +576,49 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
         )
     except Exception:
         pass
+
+
+async def _stream_thinking_to_card(
+    adapter: Any,
+    chat_id: str,
+    card_id: str,
+    thinking_text: str,
+) -> None:
+    """Stream accumulated thinking text into the CardKit thinking panel element.
+
+    Uses ``stream_card_content`` on ``THINKING_TEXT_ELEMENT_ID`` for real-time
+    typewriter rendering.  Throttled to ``THINKING_THROTTLE_SECONDS`` to avoid
+    overwhelming the CardKit API.
+    """
+    from .cardkit import stream_card_content
+    from ..channel.runtime_state import advance_card_sequence, get_card_update_lock
+
+    state = get_chat_state(adapter, chat_id)
+    now = asyncio.get_running_loop().time()
+    last = getattr(state, "last_thinking_update_at", 0.0) or 0.0
+    if last > 0 and (now - last) < THINKING_THROTTLE_SECONDS:
+        return
+    state.last_thinking_update_at = now
+
+    # Truncate to avoid sending massive thinking text every frame
+    display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
+
+    try:
+        async with get_card_update_lock(adapter, chat_id):
+            sequence = advance_card_sequence(adapter, chat_id)
+            await stream_card_content(
+                adapter,
+                card_id=card_id,
+                element_id="thinking_text",
+                content=display_text,
+                sequence=sequence,
+            )
+    except Exception:
+        # CardKit streaming failed — fall back to full-card update
+        try:
+            await sync_thinking_card(adapter, chat_id, expected_generation=0)
+        except Exception:
+            pass
 
 
 def patch_streaming_cards() -> bool:

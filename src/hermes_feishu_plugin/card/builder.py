@@ -292,7 +292,7 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "8px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": reasoning_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": "thinking_text", "content": reasoning_text, "text_size": "notation"}],
     }
 
 
