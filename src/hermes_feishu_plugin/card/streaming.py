@@ -791,11 +791,6 @@ def patch_streaming_cards() -> bool:
                 return await original_send_or_edit(self, text, finalize=finalize)
 
             self._message_id = message_id
-            # Accumulate answer text across multi-turn agent loops so tool calls
-            # and follow-up reasoning don't overwrite earlier answer segments.
-            prev_display = get_display_text(self.adapter, self.chat_id) or ""
-            if prev_display and not visible_text.startswith(prev_display):
-                visible_text = prev_display + "\n\n" + visible_text
             remember_display_text(self.adapter, self.chat_id, visible_text)
             if finalize or cursor_is_final:
                 if not await _finalize_card(
