@@ -277,7 +277,7 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
     en_label = f"💭 Thought for {label}" if label else "💭 Thought"
     return {
         "tag": "collapsible_panel",
-        "expanded": False,
+        "expanded": True,
         "header": {
             "title": {
                 "tag": "markdown",
