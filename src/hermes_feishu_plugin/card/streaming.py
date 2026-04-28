@@ -93,6 +93,13 @@ async def _ensure_card_created(
     expected_generation: int = 0,
 ) -> str | None:
     """Create the single reply card via CardKit, falling back to IM card."""
+    import traceback, time
+    try:
+        state = get_chat_state(adapter, chat_id)
+        with open("/tmp/hermes_card_create.log", "a") as _f:
+            _f.write(f"CREATE_CALLED: time={time.time():.3f} card_id={state.card_message_id} phase={state.phase} reply_to={reply_to} trace={traceback.extract_stack(limit=6)[-3:]}\n")
+    except Exception:
+        pass
     if expected_generation <= 0:
         expected_generation = _resolve_expected_generation(adapter, chat_id)
     if not _generation_matches(adapter, chat_id, expected_generation):

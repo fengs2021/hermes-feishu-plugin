@@ -5,6 +5,72 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import site
+import subprocess
+
+GATEWAY_PATCH_FILES = (
+    "gateway-reasoning-content.diff",
+)
+
+
+def _find_hermes_gateway_dirs() -> list[Path]:
+    """Return gateway directories that may need patching."""
+    candidates: list[Path] = []
+    system_gw = Path("/usr/local/lib/hermes-agent/gateway")
+    if system_gw.is_dir():
+        candidates.append(system_gw)
+    dev_gw = Path.home() / ".hermes" / "hermes-agent" / "gateway"
+    if dev_gw.is_dir():
+        candidates.append(dev_gw)
+    return candidates
+
+
+def _apply_gateway_patches(plugin_root: Path) -> list[str]:
+    """Apply gateway reasoning-content patches to hermes-agent gateway dirs."""
+    applied: list[str] = []
+    patches_dir = plugin_root / "patches"
+    if not patches_dir.is_dir():
+        return applied
+
+    gateway_dirs = _find_hermes_gateway_dirs()
+    if not gateway_dirs:
+        return applied
+
+    for patch_name in GATEWAY_PATCH_FILES:
+        patch_path = patches_dir / patch_name
+        if not patch_path.is_file():
+            continue
+        for gw_dir in gateway_dirs:
+            try:
+                result = subprocess.run(
+                    ["git", "apply", "--check", str(patch_path)],
+                    cwd=str(gw_dir.parent),
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0:
+                    subprocess.run(
+                        ["git", "apply", str(patch_path)],
+                        cwd=str(gw_dir.parent),
+                        capture_output=True, timeout=15,
+                    )
+                    applied.append(f"{gw_dir}: {patch_name} applied")
+                else:
+                    # Already applied or not a git repo — try patch command
+                    try:
+                        subprocess.run(
+                            ["patch", "-p1", "-N", "-r", "/dev/null"],
+                            input=patch_path.read_bytes(),
+                            cwd=str(gw_dir.parent),
+                            capture_output=True, timeout=15,
+                        )
+                        applied.append(f"{gw_dir}: {patch_name} applied (patch fallback)")
+                    except Exception:
+                        applied.append(f"{gw_dir}: {patch_name} skipped ({result.stderr.strip()[:80]})")
+            except Exception as exc:
+                applied.append(f"{gw_dir}: {patch_name} error: {exc}")
+    return applied
+
+
+
 
 PLUGIN_LINK_NAME = "hermes_feishu_plugin"
 LEGACY_LINK_NAMES = ("hermes-feishu-plugin",)
@@ -162,3 +228,6 @@ def main() -> None:
     """Link the plugin into all Hermes profile plugin directories."""
     for scope in sync_profile_plugin_links():
         print(scope)
+    plugin_root = _resolve_plugin_root()
+    for msg in _apply_gateway_patches(plugin_root):
+        print(msg)
