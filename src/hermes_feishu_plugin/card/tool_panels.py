@@ -234,7 +234,7 @@ def build_streaming_thinking_pending_panel() -> dict[str, Any]:
     """Build the collapsed pending thinking panel."""
     return {
         "tag": "collapsible_panel",
-        "expanded": True,
+        "is_expanded": True,
         "element_id": THINKING_ELEMENT_ID,
         "header": _thinking_header(zh="💭 思考中", en="💭 Thinking", icon_position="right"),
         "border": {"color": "grey", "corner_radius": "5px"},
@@ -256,7 +256,7 @@ def build_streaming_thinking_active_panel(
     display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
     return {
         "tag": "collapsible_panel",
-        "expanded": True,
+        "is_expanded": True,
         "element_id": THINKING_ELEMENT_ID,
         "header": _thinking_header(zh=zh_title, en=en_title, icon_position="right"),
         "border": {"color": "grey", "corner_radius": "5px"},
