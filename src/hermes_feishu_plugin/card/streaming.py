@@ -93,13 +93,7 @@ async def _ensure_card_created(
     expected_generation: int = 0,
 ) -> str | None:
     """Create the single reply card via CardKit, falling back to IM card."""
-    import traceback, time
-    try:
-        state = get_chat_state(adapter, chat_id)
-        with open("/tmp/hermes_card_create.log", "a") as _f:
-            _f.write(f"CREATE_CALLED: time={time.time():.3f} card_id={state.card_message_id} phase={state.phase} reply_to={reply_to} trace={traceback.extract_stack(limit=6)[-3:]}\n")
-    except Exception:
-        pass
+
     if expected_generation <= 0:
         expected_generation = _resolve_expected_generation(adapter, chat_id)
     if not _generation_matches(adapter, chat_id, expected_generation):
@@ -167,29 +161,38 @@ async def _ensure_card_created(
                 state.original_card_id = ""
                 state.card_sequence = 0
 
-        fallback_card = build_streaming_patch_card(
-            tool_steps=steps,
-            status_text=status_text,
-            show_tool_use=should_show_tool_use(adapter, chat_id),
-            thinking_text=get_thinking_text(adapter, chat_id),
-            thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
-        )
-        response = await send_interactive_card(
-            adapter,
-            chat_id=chat_id,
-            card=fallback_card,
-            reply_to=reply_to,
-            metadata=metadata,
-        )
-        if not response_ok(response):
-            logger.warning(
-                "hermes_feishu_plugin fallback IM card send failed: code=%s msg=%s",
-                getattr(response, "code", None),
-                getattr(response, "msg", None),
+            fallback_card = build_streaming_patch_card(
+                tool_steps=steps,
+                status_text=status_text,
+                show_tool_use=should_show_tool_use(adapter, chat_id),
+                thinking_text=get_thinking_text(adapter, chat_id),
+                thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
             )
-            return None
+            # Guard: another coroutine may have succeeded via CardKit while we were
+            # falling back.  Avoid overwriting the message_id that is already stored.
+            if state.card_message_id:
+                return state.card_message_id
+
+            response = await send_interactive_card(
+                adapter,
+                chat_id=chat_id,
+                card=fallback_card,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            if not response_ok(response):
+                logger.warning(
+                    "hermes_feishu_plugin fallback IM card send failed: code=%s msg=%s",
+                    getattr(response, "code", None),
+                    getattr(response, "msg", None),
+                )
+                return None
         message_id = extract_message_id(response)
         if message_id:
+            # Double-check again — another CardKit attempt may have completed
+            # during the IM send.  Prefer the CardKit message when available.
+            if state.card_message_id:
+                return state.card_message_id
             remember_card_message(adapter, chat_id, message_id)
             state.phase = "streaming"
             state.flush_controller = FlushController(
@@ -355,12 +358,6 @@ async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_gene
     if state.phase == "completed":
         return True
 
-    try:
-        with open("/tmp/hermes_finalize.log", "a") as _f:
-            import time as _t
-            _f.write(f"FINALIZE called: phase={state.phase} gen={expected_generation} text_len={len(text)} at {_t.time()}\n")
-    except Exception:
-        pass
 
     message_id = state.card_message_id
     if not message_id:
@@ -550,11 +547,6 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
     Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
     is unavailable (IM patch mode).
     """
-    try:
-        with open("/tmp/hermes_reasoning_delta.log", "a") as _f:
-            _f.write(f"CALLED: consumer_exists={_current_feishu_consumer is not None} text_len={len(reasoning_text) if reasoning_text else 0}\n")
-    except Exception:
-        pass
     consumer = _current_feishu_consumer
     if consumer is None or not reasoning_text:
         return
@@ -672,11 +664,6 @@ def patch_streaming_cards() -> bool:
     """Patch Hermes stream consumer so Feishu uses CardKit-first streaming."""
     import gateway.stream_consumer as stream_consumer
 
-    try:
-        with open("/tmp/hermes_reasoning_hook.log", "a") as _f:
-            _f.write(f"patch_streaming_cards called: wrapped={getattr(stream_consumer.GatewayStreamConsumer._send_or_edit, '__hermes_feishu_plugin_wrapped__', False)} hooked={getattr(stream_consumer.GatewayStreamConsumer, '__hermes_feishu_reasoning_hooked__', False)}\n")
-    except Exception:
-        pass
 
     original_send_or_edit = stream_consumer.GatewayStreamConsumer._send_or_edit
     original_on_delta = stream_consumer.GatewayStreamConsumer.on_delta
@@ -709,11 +696,6 @@ def patch_streaming_cards() -> bool:
                 _handle_reasoning_delta(text)
 
             _run_agent.AIAgent._fire_reasoning_delta = _patched_fire_reasoning
-            try:
-                with open("/tmp/hermes_reasoning_hook.log", "a") as _f:
-                    _f.write(f"HOOK INSTALLED: _fire_reasoning_delta patched\n")
-            except Exception:
-                pass
         stream_consumer.GatewayStreamConsumer.__hermes_feishu_reasoning_hooked__ = True
 
     if getattr(original_send_or_edit, "__hermes_feishu_plugin_wrapped__", False):
@@ -732,11 +714,6 @@ def patch_streaming_cards() -> bool:
         global _current_feishu_consumer
         _current_feishu_consumer = self
 
-        try:
-            with open("/tmp/hermes_send_or_edit.log", "a") as _f:
-                _f.write(f"SEND_OR_EDIT: finalize={finalize} text_len={len(cleaned)} cursor_final={strip_cursor(split_reasoning_text(cleaned)[1], self.cfg.cursor)[1]}\n")
-        except Exception:
-            pass
 
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
