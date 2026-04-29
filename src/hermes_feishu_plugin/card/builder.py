@@ -8,6 +8,7 @@ from typing import Any
 from ..core.i18n import select_text, with_i18n
 from .errors import sanitize_text_segments_for_card
 from .models import ToolDisplayStep
+from .table_parser import ParsedTable, TableCell, contains_table, parse_table
 from .tool_panels import (
     build_streaming_tool_use_active_panel,
     build_streaming_tool_use_pending_panel,
@@ -189,6 +190,73 @@ def build_streaming_patch_card(
     }
 
 
+def _build_feishu_table(table: ParsedTable) -> dict[str, Any]:
+    """Build a Feishu native table element from parsed table data."""
+    columns: list[dict[str, Any]] = []
+    for idx, col in enumerate(table.headers):
+        columns.append({
+            "name": f"col_{idx}",
+            "display_name": col.name,
+            "width": "auto",
+            "field_type": "text",
+        })
+
+    rows: list[dict[str, Any]] = []
+    for row in table.rows:
+        feishu_row: dict[str, Any] = {}
+        for idx, cell in enumerate(row):
+            if idx < len(table.headers):
+                feishu_row[f"col_{idx}"] = cell.text
+        rows.append(feishu_row)
+
+    return {"tag": "table", "columns": columns, "rows": rows}
+
+
+def _build_answer_elements(content: str) -> list[dict[str, Any]]:
+    """Build card elements from answer content, detecting and rendering Markdown tables.
+
+    If content contains Markdown table syntax, renders as Feishu native table elements.
+    Otherwise returns a single markdown element (with ATX headings converted to bold).
+    """
+    if not contains_table(content):
+        return [{"tag": "markdown", "content": _optimize_markdown_style(content)}]
+
+    tables = parse_table(content)
+    if not tables:
+        return [{"tag": "markdown", "content": _optimize_markdown_style(content)}]
+
+    elements: list[dict[str, Any]] = []
+
+    # Use the same table-block regex to walk through content in original order
+    import re as _re
+    _TABLE_BLOCK_RE = _re.compile(
+        r"((?:^\|[^\n]+\|\s*\n"
+        r"^\|[\s:|-]+\|\s*\n"
+        r"(?:^\|[^\n]+\|\s*\n?)*)+)",
+        _re.MULTILINE,
+    )
+
+    last_end = 0
+    for match in _TABLE_BLOCK_RE.finditer(content):
+        before = content[last_end:match.start()].strip()
+        if before:
+            elements.append({"tag": "markdown", "content": _optimize_markdown_style(before)})
+
+        block = match.group(1)
+        for table in tables:
+            if table.raw_markdown.strip() == block.strip():
+                elements.append(_build_feishu_table(table))
+                break
+
+        last_end = match.end()
+
+    remaining = content[last_end:].strip()
+    if remaining:
+        elements.append({"tag": "markdown", "content": _optimize_markdown_style(remaining)})
+
+    return elements
+
+
 def build_complete_card(
     *,
     text: str,
@@ -214,7 +282,8 @@ def build_complete_card(
     if sanitized_reasoning:
         elements.append(_build_reasoning_panel(sanitized_reasoning, elapsed_ms=elapsed_ms))
 
-    elements.append({"tag": "markdown", "content": _optimize_markdown_style(sanitized_answer or text or select_text("已完成。", "Done."))})
+    _answer_content = sanitized_answer or text or select_text("已完成。", "Done.")
+    elements.extend(_build_answer_elements(_answer_content))
 
     footer = _build_footer(
         elapsed_ms=elapsed_ms,
