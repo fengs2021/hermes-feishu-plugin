@@ -317,7 +317,49 @@ def _build_footer(*, elapsed_ms: int | None, is_error: bool, is_aborted: bool) -
 
 
 def _optimize_markdown_style(text: str) -> str:
-    return str(text or "").strip()
+    """Convert standard markdown to Feishu CardKit-compatible markdown.
+
+    Feishu CardKit ``tag: "markdown"`` does NOT support:
+    - ATX headings (``# Heading``)           → convert to **bold**
+    - Ordered list continuity (``1.`` reset) → pass through as-is
+    - ``~~strikethrough~~``                  → strip or pass through
+
+    Supported: **bold**, *italic*, `code`, ```code blocks```,
+    - unordered lists, > blockquotes, [text](url)
+    """
+    t = str(text or "").strip()
+    if not t:
+        return t
+
+    # Feishu CardKit does not render ATX headings; convert to bold dividers.
+    # Use a horizontal rule + bold heading line to preserve visual separation.
+    lines = t.splitlines()
+    result_lines: list[str] = []
+    in_code_fence = False
+
+    for raw_line in lines:
+        # Track code fence state to avoid processing content inside ```
+        fence_match = re.match(r"^(`{3,})(.*)$", raw_line)
+        if fence_match:
+            in_code_fence = not in_code_fence
+            result_lines.append(raw_line)
+            continue
+
+        if in_code_fence:
+            result_lines.append(raw_line)
+            continue
+
+        # ATX heading: ``# `` to ``###### ``
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", raw_line)
+        if heading_match:
+            heading_text = heading_match.group(2).strip()
+            # Render as bold underlined heading for visual weight
+            result_lines.append(f"**{heading_text}**")
+            continue
+
+        result_lines.append(raw_line)
+
+    return "\n".join(result_lines)
 
 
 def _plain_summary(text: str) -> str:
