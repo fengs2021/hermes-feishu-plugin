@@ -11,6 +11,7 @@ from ..channel.runtime_state import (
     disable_cardkit_streaming,
     get_card_id,
     get_chat_state,
+    get_display_text,
     get_generation,
     get_original_card_id,
     get_pending_status_text,
@@ -49,7 +50,7 @@ from .cardkit import (
 from .errors import is_card_rate_limit_error, is_card_table_limit_error
 from .flush_controller import FlushController
 from .live_state import current_heartbeat_text, current_progress_text, elapsed_ms, get_card_update_lock, should_show_tool_use, visible_tool_steps
-from .streaming_support import ensure_progress_heartbeat, is_feishu_adapter, resolve_reply_to_message_id, response_ok, strip_cursor
+from .streaming_support import clear_heartbeat_task, ensure_progress_heartbeat, get_heartbeat_task, is_feishu_adapter, resolve_reply_to_message_id, response_ok, strip_cursor
 from .tool_panels import (
     build_streaming_thinking_active_panel,
     build_streaming_thinking_pending_panel,
@@ -92,6 +93,7 @@ async def _ensure_card_created(
     expected_generation: int = 0,
 ) -> str | None:
     """Create the single reply card via CardKit, falling back to IM card."""
+
     if expected_generation <= 0:
         expected_generation = _resolve_expected_generation(adapter, chat_id)
     if not _generation_matches(adapter, chat_id, expected_generation):
@@ -159,29 +161,38 @@ async def _ensure_card_created(
                 state.original_card_id = ""
                 state.card_sequence = 0
 
-        fallback_card = build_streaming_patch_card(
-            tool_steps=steps,
-            status_text=status_text,
-            show_tool_use=should_show_tool_use(adapter, chat_id),
-            thinking_text=get_thinking_text(adapter, chat_id),
-            thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
-        )
-        response = await send_interactive_card(
-            adapter,
-            chat_id=chat_id,
-            card=fallback_card,
-            reply_to=reply_to,
-            metadata=metadata,
-        )
-        if not response_ok(response):
-            logger.warning(
-                "hermes_feishu_plugin fallback IM card send failed: code=%s msg=%s",
-                getattr(response, "code", None),
-                getattr(response, "msg", None),
+            fallback_card = build_streaming_patch_card(
+                tool_steps=steps,
+                status_text=status_text,
+                show_tool_use=should_show_tool_use(adapter, chat_id),
+                thinking_text=get_thinking_text(adapter, chat_id),
+                thinking_elapsed_ms=get_thinking_elapsed_ms(adapter),
             )
-            return None
+            # Guard: another coroutine may have succeeded via CardKit while we were
+            # falling back.  Avoid overwriting the message_id that is already stored.
+            if state.card_message_id:
+                return state.card_message_id
+
+            response = await send_interactive_card(
+                adapter,
+                chat_id=chat_id,
+                card=fallback_card,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            if not response_ok(response):
+                logger.warning(
+                    "hermes_feishu_plugin fallback IM card send failed: code=%s msg=%s",
+                    getattr(response, "code", None),
+                    getattr(response, "msg", None),
+                )
+                return None
         message_id = extract_message_id(response)
         if message_id:
+            # Double-check again — another CardKit attempt may have completed
+            # during the IM send.  Prefer the CardKit message when available.
+            if state.card_message_id:
+                return state.card_message_id
             remember_card_message(adapter, chat_id, message_id)
             state.phase = "streaming"
             state.flush_controller = FlushController(
@@ -285,6 +296,8 @@ async def sync_progress_card(
         return None
 
     state = get_chat_state(adapter, chat_id)
+    if state.phase in {"completed", "aborted", "terminated"}:
+        return None
     reply_to = state.reply_to_message_id or get_reply_to_message_id().strip()
     message_id = await _ensure_card_created(
         adapter,
@@ -336,7 +349,7 @@ async def sync_progress_card(
     return message_id
 
 
-async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_generation: int = 0) -> bool:
+async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_generation: int = 0, close_card: bool = False) -> bool:
     if expected_generation <= 0:
         expected_generation = _resolve_expected_generation(adapter, chat_id)
     if not _generation_matches(adapter, chat_id, expected_generation):
@@ -344,6 +357,7 @@ async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_gene
     state = get_chat_state(adapter, chat_id)
     if state.phase == "completed":
         return True
+
 
     message_id = state.card_message_id
     if not message_id:
@@ -353,6 +367,12 @@ async def _finalize_card(adapter: Any, chat_id: str, text: str, *, expected_gene
     if state.flush_controller:
         state.flush_controller.complete()
         await state.flush_controller.wait_for_flush()
+    # Stop the progress heartbeat so it doesn't overwrite the completed card
+    # with streaming-in-progress content after this turn finishes.
+    hb_task = get_heartbeat_task(adapter, chat_id)
+    if hb_task and not hb_task.done():
+        hb_task.cancel()
+        clear_heartbeat_task(adapter, chat_id)
 
     thinking_for_card = get_thinking_text(adapter, chat_id)
     complete_card = build_complete_card(
@@ -472,28 +492,15 @@ async def sync_thinking_card(
     active_card_id = get_card_id(adapter, chat_id)
     if active_card_id:
         try:
-            thinking_elapsed = get_thinking_elapsed_ms(adapter)
-            thinking_panel = build_streaming_thinking_active_panel(
-                thinking_text,
-                elapsed_ms=thinking_elapsed,
-            )
-            # Build full streaming card with thinking panel embedded
-            full_card = build_streaming_pre_answer_card(
-                text=get_chat_state(adapter, chat_id).display_text or "",
-                tool_steps=visible_tool_steps(adapter, chat_id),
-                tool_elapsed_ms=get_tool_elapsed_ms(adapter, chat_id),
-                status_text=get_pending_status_text(adapter, chat_id),
-                heartbeat_text=current_heartbeat_text(adapter, chat_id),
-                show_tool_use=should_show_tool_use(adapter, chat_id),
-                thinking_text=thinking_text,
-                thinking_elapsed_ms=thinking_elapsed,
-            )
+            # Stream thinking content into the thinking_text element for typewriter effect
+            display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
             async with get_card_update_lock(adapter, chat_id):
                 sequence = advance_card_sequence(adapter, chat_id)
-                await update_card(
+                await stream_card_content(
                     adapter,
                     card_id=active_card_id,
-                    card=full_card,
+                    element_id="thinking_text",
+                    content=display_text,
                     sequence=sequence,
                 )
             return
@@ -522,9 +529,141 @@ async def sync_thinking_card(
         logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
 
 
+_current_feishu_consumer: Any = None
+"""Thread-safe reference to the active Feishu stream consumer.
+
+Set by ``wrapped_send_or_edit`` before each sync to the card and cleared
+afterwards so the reasoning-delta handler knows which chat to target.
+"""
+
+
+def _handle_reasoning_delta(reasoning_text: str) -> None:
+    """Thread-safe handler for reasoning deltas from the agent worker thread.
+
+    Accumulates reasoning text and streams it into the CardKit thinking panel
+    in real time via ``stream_card_content`` on the ``thinking_text`` element.
+    When the card hasn't been created yet (reasoning arrives before the first
+    text token), eagerly creates the card so the thinking panel can stream.
+    Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
+    is unavailable (IM patch mode).
+    """
+    consumer = _current_feishu_consumer
+    if consumer is None or not reasoning_text:
+        return
+    adapter = getattr(consumer, "adapter", None)
+    chat_id = getattr(consumer, "chat_id", None)
+    if not adapter or not chat_id or not is_feishu_adapter(adapter):
+        return
+    if not should_stream(adapter, chat_id):
+        return
+    try:
+        current = get_thinking_text(adapter, chat_id)
+        new_thinking = current + str(reasoning_text)
+        remember_thinking_text(adapter, chat_id, new_thinking)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        active_card_id = get_card_id(adapter, chat_id)
+        if active_card_id:
+            # Card exists — stream thinking text incrementally
+            asyncio.run_coroutine_threadsafe(
+                _stream_thinking_to_card(adapter, chat_id, active_card_id, new_thinking),
+                loop,
+            )
+        else:
+            # Card not created yet — eagerly create it so thinking can stream
+            asyncio.run_coroutine_threadsafe(
+                _ensure_card_for_reasoning(consumer, adapter, chat_id),
+                loop,
+            )
+    except Exception as exc:
+        import logging
+        logging.getLogger("hermes_feishu_plugin").warning(
+            "reasoning delta handler error: %s", exc, exc_info=True
+        )
+
+
+async def _ensure_card_for_reasoning(
+    consumer: Any,
+    adapter: Any,
+    chat_id: str,
+) -> None:
+    """Eagerly create the streaming card when reasoning arrives before text.
+
+    Without this, reasoning_content deltas arrive before the first text token
+    and have no card to stream into — all thinking text is buffered and only
+    appears in one burst when the card is finally created.
+    """
+    from .streaming_support import resolve_reply_to_message_id
+
+    state = get_chat_state(adapter, chat_id)
+    if state.card_message_id or state.phase in ("streaming", "completed", "aborted", "terminated"):
+        return
+
+    expected_generation = _resolve_expected_generation(adapter, chat_id, owner=consumer)
+    await _ensure_card_created(
+        adapter,
+        chat_id,
+        reply_to=resolve_reply_to_message_id(consumer),
+        metadata=getattr(consumer, "metadata", None),
+        expected_generation=expected_generation,
+    )
+
+
+async def _stream_thinking_to_card(
+    adapter: Any,
+    chat_id: str,
+    card_id: str,
+    thinking_text: str,
+) -> None:
+    """Stream accumulated thinking text into the CardKit thinking panel element.
+
+    Uses ``stream_card_content`` on ``THINKING_TEXT_ELEMENT_ID`` for real-time
+    typewriter rendering.  Throttled to ``THINKING_THROTTLE_SECONDS`` to avoid
+    overwhelming the CardKit API.
+    """
+    from .cardkit import stream_card_content
+    from ..channel.runtime_state import advance_card_sequence, get_card_update_lock
+
+    state = get_chat_state(adapter, chat_id)
+    now = asyncio.get_running_loop().time()
+    last = getattr(state, "last_thinking_update_at", 0.0) or 0.0
+    if last > 0 and (now - last) < THINKING_THROTTLE_SECONDS:
+        return
+    state.last_thinking_update_at = now
+
+    # Truncate to avoid sending massive thinking text every frame
+    display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
+
+    try:
+        async with get_card_update_lock(adapter, chat_id):
+            sequence = advance_card_sequence(adapter, chat_id)
+            await stream_card_content(
+                adapter,
+                card_id=card_id,
+                element_id="thinking_text",
+                content=display_text,
+                sequence=sequence,
+            )
+    except Exception as exc:
+        # CardKit streaming failed — fall back to full-card update
+        import logging as _log
+        _log.getLogger("hermes_feishu_plugin").warning(
+            "stream_thinking_to_card CardKit streaming failed, falling back to sync: %s", exc
+        )
+        try:
+            await sync_thinking_card(adapter, chat_id, expected_generation=0)
+        except Exception:
+            pass
+
+
 def patch_streaming_cards() -> bool:
     """Patch Hermes stream consumer so Feishu uses CardKit-first streaming."""
     import gateway.stream_consumer as stream_consumer
+
 
     original_send_or_edit = stream_consumer.GatewayStreamConsumer._send_or_edit
     original_on_delta = stream_consumer.GatewayStreamConsumer.on_delta
@@ -539,6 +678,26 @@ def patch_streaming_cards() -> bool:
         wrapped_on_delta.__hermes_feishu_plugin_wrapped__ = True
         stream_consumer.GatewayStreamConsumer.on_delta = wrapped_on_delta
 
+    # Hook agent reasoning stream so DeepSeek / MiniMax reasoning_content
+    # deltas flow into the CardKit thinking panel.  The agent fires
+    # _fire_reasoning_delta from its worker thread; we route those into
+    # remember_thinking_text + sync_thinking_card so the collapsible
+    # thinking panel inside the card stays populated.
+    if not getattr(stream_consumer.GatewayStreamConsumer, "__hermes_feishu_reasoning_hooked__", False):
+        try:
+            import run_agent as _run_agent
+        except Exception:
+            logger.warning("hermes_feishu_plugin reasoning hook skipped: cannot import run_agent")
+        else:
+            _original_fire_reasoning = _run_agent.AIAgent._fire_reasoning_delta
+
+            def _patched_fire_reasoning(self: Any, text: str) -> None:
+                _original_fire_reasoning(self, text)
+                _handle_reasoning_delta(text)
+
+            _run_agent.AIAgent._fire_reasoning_delta = _patched_fire_reasoning
+        stream_consumer.GatewayStreamConsumer.__hermes_feishu_reasoning_hooked__ = True
+
     if getattr(original_send_or_edit, "__hermes_feishu_plugin_wrapped__", False):
         return True
 
@@ -551,6 +710,10 @@ def patch_streaming_cards() -> bool:
             return await original_send_or_edit(self, text, finalize=finalize)
         if not should_stream(self.adapter, self.chat_id):
             return await original_send_or_edit(self, text, finalize=finalize)
+
+        global _current_feishu_consumer
+        _current_feishu_consumer = self
+
 
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
@@ -573,6 +736,12 @@ def patch_streaming_cards() -> bool:
         if cleaned == self._last_sent_text:
             return True
 
+        # If the card was completed by a previous cursor-final turn, re-open it
+        # for the next turn in a multi-turn agent loop.
+        state = get_chat_state(self.adapter, self.chat_id)
+        if state.phase == "completed":
+            state.phase = "streaming"
+
         # Extract thinking content and accumulate it
         reasoning_raw, answer_raw = split_reasoning_text(cleaned)
         if reasoning_raw:
@@ -591,7 +760,9 @@ def patch_streaming_cards() -> bool:
             )
         # Use answer (stripped of thinking tags) as the visible text
         visible_text, cursor_is_final = strip_cursor(answer_raw, self.cfg.cursor)
-        is_final = finalize or cursor_is_final
+        # cursor_is_final=True means this turn's text stream ended, but in multi-turn
+        # agent loops more turns may follow. Only the gateway's finalize=True signal
+        # should truly close the card. cursor_is_final triggers a content flush only.
         try:
             message_id = await _ensure_card_created(
                 self.adapter,
@@ -605,12 +776,13 @@ def patch_streaming_cards() -> bool:
 
             self._message_id = message_id
             remember_display_text(self.adapter, self.chat_id, visible_text)
-            if is_final:
+            if finalize or cursor_is_final:
                 if not await _finalize_card(
                     self.adapter,
                     self.chat_id,
                     visible_text,
                     expected_generation=expected_generation,
+                    close_card=finalize,
                 ):
                     return await original_send_or_edit(self, text, finalize=finalize)
             else:
@@ -619,6 +791,11 @@ def patch_streaming_cards() -> bool:
                     self.chat_id,
                     expected_generation=expected_generation,
                 )
+                # When cursor signals turn-end in a multi-turn stream, force a final
+                # flush so the card shows this turn's complete answer before the next.
+                if cursor_is_final and state.flush_controller:
+                    state.flush_controller.complete()
+                    await state.flush_controller.wait_for_flush()
 
             self._already_sent = True
             self._last_sent_text = cleaned

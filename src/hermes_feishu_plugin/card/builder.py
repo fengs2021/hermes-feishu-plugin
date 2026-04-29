@@ -275,9 +275,12 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
     label = format_elapsed(elapsed_ms) if elapsed_ms else ""
     zh_label = f"💭 思考了 {label}" if label else "💭 思考"
     en_label = f"💭 Thought for {label}" if label else "💭 Thought"
+    if len(reasoning_text) > 3000:
+        reasoning_text = reasoning_text[:3000] + "..."
     return {
         "tag": "collapsible_panel",
-        "expanded": False,
+        "is_expanded": False,
+        "element_id": "reasoning_content",
         "header": {
             "title": {
                 "tag": "markdown",
@@ -285,16 +288,15 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
                 "i18n_content": {"zh_cn": zh_label, "en_us": en_label},
             },
             "vertical_align": "center",
-            "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
+            "icon": {"tag": "standard_icon", "token": "down-s...ined", "size": "16px 16px"},
             "icon_position": "follow_text",
             "icon_expanded_angle": -180,
         },
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "8px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": reasoning_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": "thinking_text", "content": reasoning_text, "text_size": "notation"}],
     }
-
 
 def _build_footer(*, elapsed_ms: int | None, is_error: bool, is_aborted: bool) -> dict[str, Any]:
     zh_parts = ["出错" if is_error else "已停止" if is_aborted else "已完成"]

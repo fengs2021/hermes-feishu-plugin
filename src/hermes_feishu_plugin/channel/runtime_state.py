@@ -190,10 +190,31 @@ def get_last_card_update_at(adapter: Any, chat_id: str) -> float:
 
 
 def remember_display_text(adapter: Any, chat_id: str, text: str) -> None:
-    """Persist the latest visible streamed text."""
+    """Append visible streamed text across multi-turn answers, with dedup.
+
+    Dedup rules:
+    - If new text starts with the old text → replace (streaming increment).
+    - If old text already contains new text → skip (duplicate, e.g. finalize re-send).
+    - Otherwise → append with ``\n\n`` separator (new answer segment).
+    """
     state = get_chat_state(adapter, chat_id)
     next_text = str(text or "")
-    if next_text != state.display_text and next_text.strip():
+    if not next_text.strip():
+        return
+    old_text = state.display_text
+    if next_text == old_text:
+        return
+    if old_text and next_text.startswith(old_text):
+        # Streaming increment: new text = old + extra tokens
+        pass
+    elif old_text and next_text in old_text:
+        # Already captured (e.g. finalize re-sends same text)
+        return
+    elif old_text:
+        # New answer segment: append
+        next_text = old_text + "\n\n" + next_text
+    # else: old_text is empty — first segment, use as-is
+    if next_text != old_text:
         note_visible_activity(adapter, chat_id)
         state.pending_status_text = ""
     state.display_text = next_text

@@ -227,19 +227,20 @@ def _escape_tool_markdown(text: str) -> str:
 
 
 THINKING_ELEMENT_ID = "reasoning_content"
+THINKING_TEXT_ELEMENT_ID = "thinking_text"
 
 
 def build_streaming_thinking_pending_panel() -> dict[str, Any]:
     """Build the collapsed pending thinking panel."""
     return {
         "tag": "collapsible_panel",
-        "expanded": False,
+        "is_expanded": True,
         "element_id": THINKING_ELEMENT_ID,
         "header": _thinking_header(zh="💭 思考中", en="💭 Thinking", icon_position="right"),
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": "...", "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": "...", "text_size": "notation"}],
     }
 
 
@@ -255,13 +256,13 @@ def build_streaming_thinking_active_panel(
     display_text = thinking_text[-3000:] if len(thinking_text) > 3000 else thinking_text
     return {
         "tag": "collapsible_panel",
-        "expanded": False,
+        "is_expanded": True,
         "element_id": THINKING_ELEMENT_ID,
         "header": _thinking_header(zh=zh_title, en=en_title, icon_position="right"),
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": display_text, "text_size": "notation"}],
     }
 
 
@@ -284,7 +285,7 @@ def build_thinking_panel(
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": "4px",
         "padding": "8px 8px 8px 8px",
-        "elements": [{"tag": "markdown", "content": display_text, "text_size": "notation"}],
+        "elements": [{"tag": "markdown", "element_id": THINKING_TEXT_ELEMENT_ID, "content": display_text, "text_size": "notation"}],
     }
 
 
