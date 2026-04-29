@@ -20,12 +20,30 @@
 - **`sync_thinking_card` 改用 `stream_card_content`** — 思维面板内容现在通过 CardKit 元素级流式更新，替代全量卡片替换
 - **思维面板默认展开** — `tool_panels.py` 和 `builder.py` 中 `expanded: True`，推理时无需手动展开即可看到思考内容
 - **`_handle_reasoning_delta` 异常处理** — 去掉静默 `except Exception: pass`，改为 `logger.warning` 带完整堆栈
-- **诊断日志** — 临时文件 `/tmp/hermes_reasoning_delta.log` 记录每次推理增量调用
 
 ### 中文思维支持
 
 - **`prefill_chinese.json`** — 创建预填系统消息文件，要求模型在推理阶段使用中文
 - **`prefill_messages_file` 配置** — `config.yaml` 指向预填文件，每次飞书对话自动注入
+
+---
+
+## [未发布] - 2026-04-29
+
+### 重复卡片修复
+
+**问题**：每次对话产生两个卡片（一个空白"思考中"占位卡片 + 一个正常卡片）。
+
+**根因**：`_ensure_card_created` 中 CardKit 路径失败后，IM fallback（`send_interactive_card`）在 `card_create_lock` 锁外执行。当另一个协程的 CardKit 路径成功时，两个卡片同时创建，导致重复。
+
+**修复**：
+- **IM fallback 移入锁内** — 整个创建路径（CardKit 尝试 + IM fallback）现在原子化，一个 `chat_id` 只创建一个卡片
+- **移除 5 处诊断日志** — 清理 `/tmp/hermes_*.log` 临时文件写入，减少 I/O 开销
+- **最终卡片思维面板折叠** — `builder.py` 中 `_build_reasoning_panel` 使用 `is_expanded: False`，tool_panels 流式面板使用 `is_expanded: True`
+
+### Gateway 补丁安装
+
+- `install.py` 新增 `_apply_gateway_patches()` — 自动应用 `patches/gateway-reasoning-content.diff` 到 hermes-agent gateway 核心文件
 
 ---
 
