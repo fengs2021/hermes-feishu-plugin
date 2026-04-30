@@ -101,8 +101,8 @@ async def _ensure_card_created(
     state = get_chat_state(adapter, chat_id)
     if state.card_message_id:
         return state.card_message_id
-    if not reply_to:
-        return None
+    # Note: reply_to may be None for DM (no parent message to reply to).
+    # send_card_reference handles None by creating a new message instead of replying.
     if state.card_create_lock is None:
         state.card_create_lock = asyncio.Lock()
 
