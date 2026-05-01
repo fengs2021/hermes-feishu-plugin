@@ -1,26 +1,19 @@
-# Support This Project
+# These are funded supporters via GitHub Sponsors
+# Set up at https://github.com/sponsors/zirflow
+github: []
 
-If hermes-feishu-plugin-1 is useful to you, you can support the team in the following ways:
+# GitHub Sponsors (uncomment when set up)
+# sponsor: zirflow
 
-## ☕ Buy Me a Coffee
+# ko-fi (if you have an account)
+# ko_fi: your-username
 
-[Buy me a coffee via 微信/支付宝]()
+# Open Collective (if you have an account)
+# open_collective: zirflow
 
-## 💰 Sponsor via GitHub Sponsors
-
-[Sponsor on GitHub](https://github.com/sponsors/zirflow)
-
-## 🏢 Enterprise Support
-
-For enterprise support, custom development, or consulting:
-
-- Email: contact@zirflow.com
-- GitHub Discussion: [Open an issue](https://github.com/zirflow/hermes-feishu-plugin-1/discussions)
-
-## 🌟 Star the Repo
-
-If nothing else, a ⭐ on GitHub helps the project get discovered:
-
-```
-https://github.com/zirflow/hermes-feishu-plugin-1
-```
+# 微信/支付宝/其他收款方式（手动填入你的收款二维码链接或 ID）
+custom:
+  - name: 微信
+    url: "https://your-wechat-payment-link.com"  # 替换为你的微信收款链接
+  - name: 支付宝
+    url: "https://your-alipay-link.com"  # 替换为你的支付宝收款链接
