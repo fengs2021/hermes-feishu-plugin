@@ -531,9 +531,16 @@ async def sync_thinking_card(
         logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
 
 
-_reasoning_delta_queue: list[str] = []
+_thread_consumer_map: dict[int, Any] = {}
+"""Map from thread identity to the Feishu stream consumer for that thread.
+
+Set by ``wrapped_send_or_edit`` when the LLM call starts (async thread),
+read by ``_handle_reasoning_delta`` when the worker thread fires reasoning
+deltas.  Each thread has its own dict slot so concurrent LLM calls don't
+overwrite each other.
+"""
+
 _reasoning_delta_lock = threading.Lock()
-"""Thread-safe queue of reasoning text deltas from the worker thread."""
 
 
 def _handle_reasoning_delta(reasoning_text: str) -> None:
@@ -546,7 +553,9 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
     Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
     is unavailable (IM patch mode).
     """
-    consumer = _current_feishu_consumer
+    # Get consumer from thread map (worker thread id -> consumer)
+    thread_key = threading.current_thread().ident
+    consumer = _thread_consumer_map.get(thread_key)
     if consumer is None or not reasoning_text:
         return
     adapter = getattr(consumer, "adapter", None)
@@ -560,9 +569,13 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
         new_thinking = current + str(reasoning_text)
         remember_thinking_text(adapter, chat_id, new_thinking)
 
+        # Worker thread has no running event loop, so use get_event_loop()
+        # (safe here since we're scheduling coroutines, not blocking the loop)
         try:
-            loop = asyncio.get_running_loop()
+            loop = asyncio.get_event_loop()
         except RuntimeError:
+            loop = None
+        if loop is None or not loop.is_running():
             return
 
         active_card_id = get_card_id(adapter, chat_id)
@@ -704,8 +717,11 @@ def patch_streaming_cards() -> bool:
         if not should_stream(self.adapter, self.chat_id):
             return await original_send_or_edit(self, text, finalize=finalize)
 
-        global _current_feishu_consumer
-        _current_feishu_consumer = self
+        # Register this consumer in the thread map so the worker thread
+        # (which fires reasoning deltas) can look it up safely even when
+        # multiple chats are streaming concurrently.
+        thread_key = threading.current_thread().ident
+        _thread_consumer_map[thread_key] = self
 
         logger.debug(
             "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",

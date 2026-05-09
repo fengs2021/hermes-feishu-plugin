@@ -82,6 +82,20 @@ LEGACY_PLUGIN_DIR_NAMES = ("runtime_patches",)
 STARTUP_PTH_NAME = "hermes_feishu_plugin_startup.pth"
 SITECUSTOMIZE_NAME = "sitecustomize.py"
 STARTUP_IMPORT_LINE = "import hermes_feishu_plugin.startup\n"
+
+
+def _build_startup_import_line() -> str:
+    """Build the startup import line with a dynamically-resolved plugin src path.
+
+    This avoids hardcoding absolute paths so the plugin installs correctly
+    on any machine, not just the developer's.
+    """
+    src_path = str(_resolve_plugin_root() / "src")
+    return (
+        "import sys, os\n"
+        f"sys.path.insert(0, '{src_path}')\n"
+        "import hermes_feishu_plugin.startup\n"
+    )
 INSTALL_IGNORE_PATTERNS = (
     ".git",
     "__pycache__",
@@ -166,14 +180,15 @@ def _iter_site_package_dirs() -> list[Path]:
 
 
 def _write_startup_loader(plugins_root: Path) -> list[str]:
+    startup_line = _build_startup_import_line()
     synced: list[str] = []
     sitecustomize_path = plugins_root / SITECUSTOMIZE_NAME
-    sitecustomize_path.write_text(STARTUP_IMPORT_LINE, encoding="utf-8")
+    sitecustomize_path.write_text(startup_line, encoding="utf-8")
     synced.append(str(sitecustomize_path))
 
     for site_dir in _iter_site_package_dirs():
         pth_path = site_dir / STARTUP_PTH_NAME
-        pth_path.write_text(STARTUP_IMPORT_LINE, encoding="utf-8")
+        pth_path.write_text(startup_line, encoding="utf-8")
         synced.append(str(pth_path))
     return synced
 
