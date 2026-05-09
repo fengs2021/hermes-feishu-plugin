@@ -544,6 +544,13 @@ _reasoning_delta_lock = threading.Lock()
 # Global map: AIAgent id(self) -> GatewayStreamConsumer
 _agent_consumer_map: dict[int, Any] = {}
 
+# Pending reasoning buffer: when MiniMax reasoning_content arrives before the
+# GatewayStreamConsumer has registered itself in _agent_consumer_map (i.e. before
+# the first text delta), we buffer the content here keyed by agent_id.
+# When the consumer finally registers, wrapped_send_or_edit drains this buffer
+# and uses it to seed the thinking panel.
+_pending_reasoning_by_agent: dict[int, str] = {}
+
 
 def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) -> None:
     """Thread-safe handler for reasoning deltas from the agent worker thread.
@@ -571,7 +578,24 @@ def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) ->
         thread_key = threading.current_thread().ident
         consumer = _thread_consumer_map.get(thread_key)
         logger.info("[Feishu Streaming] _handle_reasoning_delta: thread_fallback key=%s consumer=%s", thread_key, consumer)
-    if consumer is None or not reasoning_text:
+    # consumer is None means reasoning arrived before the first text delta
+    # (MiniMax sends reasoning_content before any text token).
+    # Buffer it per-agent so wrapped_send_or_edit can drain it when the
+    # consumer finally registers.
+    if consumer is None:
+        if agent_id and reasoning_text:
+            with _reasoning_delta_lock:
+                _pending_reasoning_by_agent[agent_id] = (
+                    _pending_reasoning_by_agent.get(agent_id, "") + reasoning_text
+                )
+            logger.info(
+                "[Feishu Streaming] _handle_reasoning_delta: no consumer yet, "
+                "buffered reasoning for agent_id=%s (total=%d)",
+                agent_id,
+                len(_pending_reasoning_by_agent.get(agent_id, "")),
+            )
+        return
+    if not reasoning_text:
         return
     adapter = getattr(consumer, "adapter", None)
     chat_id = getattr(consumer, "chat_id", None)
@@ -741,6 +765,17 @@ def patch_streaming_cards() -> bool:
         # (which has no thread context) can find the right consumer.
         if hasattr(self, "_agent") and self._agent is not None:
             _agent_consumer_map[id(self._agent)] = self
+            # Drain any pending reasoning that arrived before this consumer
+            # registered (MiniMax sends reasoning_content before the first text
+            # delta, so the buffer is almost always populated on first turn).
+            with _reasoning_delta_lock:
+                pending = _pending_reasoning_by_agent.pop(id(self._agent), "")
+            if pending:
+                logger.info(
+                    "[Feishu Streaming] draining pending reasoning for agent_id=%s len=%d",
+                    id(self._agent), len(pending),
+                )
+                remember_thinking_text(self.adapter, self.chat_id, pending)
 
         logger.debug(
             "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",
