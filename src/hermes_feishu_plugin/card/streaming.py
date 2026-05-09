@@ -553,9 +553,12 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
     Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
     is unavailable (IM patch mode).
     """
+    logger.info("[Feishu Streaming] _handle_reasoning_delta called: len=%d", len(reasoning_text or ""))
     # Get consumer from thread map (worker thread id -> consumer)
     thread_key = threading.current_thread().ident
     consumer = _thread_consumer_map.get(thread_key)
+    if consumer is None:
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: no consumer for thread %s", thread_key)
     if consumer is None or not reasoning_text:
         return
     adapter = getattr(consumer, "adapter", None)
