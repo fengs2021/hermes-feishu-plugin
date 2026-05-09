@@ -149,12 +149,24 @@ def record_tool_finish(
 
 
 def fallback_steps_from_lines(lines: list[str]) -> list[ToolDisplayStep]:
-    """Convert plain fallback progress lines into structured running steps."""
+    """Convert plain fallback progress lines into structured running steps.
+
+    Lines may carry [tool] or [done] prefixes from parse_tool_progress_lines.
+    - [tool] prefix → status="running"
+    - [done] prefix → status="success"
+    - No prefix → status="running" (default)
+    """
     steps: list[ToolDisplayStep] = []
     for line in lines:
         cleaned = " ".join(str(line or "").split()).strip()
         if not cleaned:
             continue
+
+        # Detect done vs running from explicit prefix
+        is_done = cleaned.startswith("[done]")
+        if cleaned.startswith("[tool]") or cleaned.startswith("[done]"):
+            cleaned = cleaned.split(" ", 1)[1].strip()
+
         title = cleaned
         detail = None
         if " — " in cleaned:
@@ -164,7 +176,7 @@ def fallback_steps_from_lines(lines: list[str]) -> list[ToolDisplayStep]:
                 title=title.strip(),
                 detail=detail.strip() if detail else None,
                 icon_token="setting-inter_outlined",
-                status="running",
+                status="success" if is_done else "running",
             )
         )
     return steps
