@@ -546,10 +546,12 @@ _agent_consumer_map: dict[int, Any] = {}
 
 # Pending reasoning buffer: when MiniMax reasoning_content arrives before the
 # GatewayStreamConsumer has registered itself in _agent_consumer_map (i.e. before
-# the first text delta), we buffer the content here keyed by agent_id.
-# When the consumer finally registers, wrapped_send_or_edit drains this buffer
-# and uses it to seed the thinking panel.
-_pending_reasoning_by_agent: dict[int, str] = {}
+# the first text delta), we buffer the content here keyed by thread_ident.
+# When the consumer finally registers (same thread), wrapped_send_or_edit drains
+# this buffer and uses it to seed the thinking panel.
+# Using thread_ident (not agent_id) because gateway may create different
+# AIAgent instances for the reasoning stream vs the text stream.
+_pending_reasoning_by_thread: dict[int, str] = {}
 
 
 def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) -> None:
@@ -580,19 +582,19 @@ def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) ->
         logger.info("[Feishu Streaming] _handle_reasoning_delta: thread_fallback key=%s consumer=%s", thread_key, consumer)
     # consumer is None means reasoning arrived before the first text delta
     # (MiniMax sends reasoning_content before any text token).
-    # Buffer it per-agent so wrapped_send_or_edit can drain it when the
-    # consumer finally registers.
+    # Buffer it per thread so wrapped_send_or_edit (same thread) can drain it.
     if consumer is None:
-        if agent_id and reasoning_text:
+        thread_key = threading.current_thread().ident
+        if reasoning_text:
             with _reasoning_delta_lock:
-                _pending_reasoning_by_agent[agent_id] = (
-                    _pending_reasoning_by_agent.get(agent_id, "") + reasoning_text
+                _pending_reasoning_by_thread[thread_key] = (
+                    _pending_reasoning_by_thread.get(thread_key, "") + reasoning_text
                 )
             logger.info(
                 "[Feishu Streaming] _handle_reasoning_delta: no consumer yet, "
-                "buffered reasoning for agent_id=%s (total=%d)",
-                agent_id,
-                len(_pending_reasoning_by_agent.get(agent_id, "")),
+                "buffered reasoning for thread=%s (total=%d)",
+                thread_key,
+                len(_pending_reasoning_by_thread.get(thread_key, "")),
             )
         return
     if not reasoning_text:
@@ -765,17 +767,17 @@ def patch_streaming_cards() -> bool:
         # (which has no thread context) can find the right consumer.
         if hasattr(self, "_agent") and self._agent is not None:
             _agent_consumer_map[id(self._agent)] = self
-            # Drain any pending reasoning that arrived before this consumer
-            # registered (MiniMax sends reasoning_content before the first text
-            # delta, so the buffer is almost always populated on first turn).
-            with _reasoning_delta_lock:
-                pending = _pending_reasoning_by_agent.pop(id(self._agent), "")
-            if pending:
-                logger.info(
-                    "[Feishu Streaming] draining pending reasoning for agent_id=%s len=%d",
-                    id(self._agent), len(pending),
-                )
-                remember_thinking_text(self.adapter, self.chat_id, pending)
+        # Drain any pending reasoning that arrived before this consumer
+        # registered (MiniMax sends reasoning_content before the first text
+        # delta). Use thread_key since that's what we buffered by.
+        with _reasoning_delta_lock:
+            pending = _pending_reasoning_by_thread.pop(thread_key, "")
+        if pending:
+            logger.info(
+                "[Feishu Streaming] draining pending reasoning for thread=%s len=%d",
+                thread_key, len(pending),
+            )
+            remember_thinking_text(self.adapter, self.chat_id, pending)
 
         logger.debug(
             "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",
