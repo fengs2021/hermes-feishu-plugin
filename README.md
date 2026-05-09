@@ -41,7 +41,7 @@ git clone https://github.com/zirflow/hermes-feishu-plugin-1.git ~/hermes-feishu-
 |------|------|
 | 🧠 **思维链流式展示** | 折叠面板内实时流式渲染 AI 推理过程，打字机效果，0.3s 节流 |
 | 🔄 **多轮卡片生命周期** | 一个卡片贯穿整个 Agent 循环（推理→工具→回答→...→最终），不丢失任何中间状态 |
-| 🇨🇳 **中文思维预填** | 自动注入系统提示词，引导模型在推理阶段使用中文思考 |
+
 | 📊 **表格自动转换** | Markdown 表格 → 飞书原生表格，保留格式，无需手动调整 |
 | ⚡ **CardKit 流式卡片** | 基于飞书 CardKit 的元素级流式更新，而非全量替换，卡片更稳定 |
 | 🔌 **WebSocket 回调** | 支持卡片按钮点击事件回调，实现真正的交互式卡片 |
@@ -141,26 +141,7 @@ systemctl restart hermes-gateway
 - 工具调用显示在折叠面板内，可展开查看
 - 最终答案完成后，所有中间过程保留在卡片中
 
-### 3. 中文思维预填
-
-通过 `prefill_chinese.json` 自动注入系统提示：
-
-```json
-{
-  "role": "system",
-  "content": "你是一个 helpful assistant。在推理阶段（<thinking>...</thinking> 标签内），请使用中文进行思考。"
-}
-```
-
-配置方式：
-
-```yaml
-# config.yaml
-hermes_feishu_plugin:
-  prefill_messages_file: "prefill_chinese.json"
-```
-
-### 4. Markdown 表格 → 飞书原生表格
+### 3. Markdown 表格 → 飞书原生表格
 
 输入：
 ````
@@ -173,8 +154,6 @@ hermes_feishu_plugin:
 输出：自动转换为飞书 `<table>` 元素，保留边框、对齐、样式。
 
 ### 5. WebSocket 卡片回调
-
-支持卡片内按钮点击事件：
 
 ```python
 # 示例：配置回调路由
@@ -322,7 +301,6 @@ hermes_feishu_plugin:
     expanded: true           # 默认展开思维面板
     streaming: true          # 流式渲染思维内容
     throttle_ms: 300          # 流式节流（毫秒）
-    chinese_prefill: true     # 启用中文思维预填
 
   # 回复模式
   reply_mode: "auto"         # auto | streaming | static

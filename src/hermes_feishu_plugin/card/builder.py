@@ -348,7 +348,7 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
         reasoning_text = reasoning_text[:3000] + "..."
     return {
         "tag": "collapsible_panel",
-        "is_expanded": False,
+        "expanded": False,
         "element_id": "reasoning_content",
         "header": {
             "title": {
@@ -357,7 +357,7 @@ def _build_reasoning_panel(reasoning_text: str, *, elapsed_ms: int | None) -> di
                 "i18n_content": {"zh_cn": zh_label, "en_us": en_label},
             },
             "vertical_align": "center",
-            "icon": {"tag": "standard_icon", "token": "down-s...ined", "size": "16px 16px"},
+            "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "size": "16px 16px"},
             "icon_position": "follow_text",
             "icon_expanded_angle": -180,
         },
