@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from ..channel.runtime_state import (
@@ -126,6 +127,7 @@ async def _ensure_card_created(
         try:
             card_id = await create_card_entity(adapter, initial_card)
             remember_card_entity(adapter, chat_id, card_id)
+            logger.info("[Feishu Streaming] CardKit card created card_id=%s, sending reference to chat=%s", card_id, chat_id)
             response = await send_card_reference(
                 adapter,
                 chat_id=chat_id,
@@ -529,12 +531,9 @@ async def sync_thinking_card(
         logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
 
 
-_current_feishu_consumer: Any = None
-"""Thread-safe reference to the active Feishu stream consumer.
-
-Set by ``wrapped_send_or_edit`` before each sync to the card and cleared
-afterwards so the reasoning-delta handler knows which chat to target.
-"""
+_reasoning_delta_queue: list[str] = []
+_reasoning_delta_lock = threading.Lock()
+"""Thread-safe queue of reasoning text deltas from the worker thread."""
 
 
 def _handle_reasoning_delta(reasoning_text: str) -> None:
@@ -580,10 +579,7 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
                 loop,
             )
     except Exception as exc:
-        import logging
-        logging.getLogger("hermes_feishu_plugin").warning(
-            "reasoning delta handler error: %s", exc, exc_info=True
-        )
+        logger.warning("reasoning delta handler error: %s", exc, exc_info=True)
 
 
 async def _ensure_card_for_reasoning(
@@ -650,10 +646,7 @@ async def _stream_thinking_to_card(
             )
     except Exception as exc:
         # CardKit streaming failed — fall back to full-card update
-        import logging as _log
-        _log.getLogger("hermes_feishu_plugin").warning(
-            "stream_thinking_to_card CardKit streaming failed, falling back to sync: %s", exc
-        )
+        logger.warning("stream_thinking_to_card CardKit streaming failed, falling back to sync: %s", exc)
         try:
             await sync_thinking_card(adapter, chat_id, expected_generation=0)
         except Exception:
@@ -670,10 +663,10 @@ def patch_streaming_cards() -> bool:
 
     if not getattr(original_on_delta, "__hermes_feishu_plugin_wrapped__", False):
 
-        def wrapped_on_delta(self: Any, text: str | None) -> None:
+        def wrapped_on_delta(self: Any, text: str | None, *, reasoning_content: str | None = None) -> None:
             if text is None and is_feishu_adapter(self.adapter):
                 return
-            return original_on_delta(self, text)
+            return original_on_delta(self, text, reasoning_content=reasoning_content)
 
         wrapped_on_delta.__hermes_feishu_plugin_wrapped__ = True
         stream_consumer.GatewayStreamConsumer.on_delta = wrapped_on_delta
@@ -714,10 +707,13 @@ def patch_streaming_cards() -> bool:
         global _current_feishu_consumer
         _current_feishu_consumer = self
 
-
+        logger.debug(
+            "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",
+            self.chat_id, len(text or ""), finalize,
+        )
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
-            self._already_sent = True
+            logger.debug("[Feishu Streaming] gen mismatch, falling back chat=%s", self.chat_id)
             return False
 
         if should_suppress_status_message(cleaned):
@@ -730,7 +726,6 @@ def patch_streaming_cards() -> bool:
                     metadata=self.metadata,
                     expected_generation=expected_generation,
                 )
-            self._already_sent = True
             return True
 
         if cleaned == self._last_sent_text:
@@ -772,9 +767,11 @@ def patch_streaming_cards() -> bool:
                 expected_generation=expected_generation,
             )
             if not message_id:
+                logger.info("[Feishu Streaming] _ensure_card_created returned None, fallback chat=%s", self.chat_id)
                 return await original_send_or_edit(self, text, finalize=finalize)
 
             self._message_id = message_id
+            logger.info("[Feishu Streaming] card created msg_id=%s chat=%s", message_id, self.chat_id)
             remember_display_text(self.adapter, self.chat_id, visible_text)
             if finalize or cursor_is_final:
                 if not await _finalize_card(
@@ -784,6 +781,7 @@ def patch_streaming_cards() -> bool:
                     expected_generation=expected_generation,
                     close_card=finalize,
                 ):
+                    logger.warning("[Feishu Streaming] _finalize_card failed, fallback chat=%s", self.chat_id)
                     return await original_send_or_edit(self, text, finalize=finalize)
             else:
                 await _flush_answer(
@@ -799,14 +797,11 @@ def patch_streaming_cards() -> bool:
 
             self._already_sent = True
             self._last_sent_text = cleaned
+            logger.info("[Feishu Streaming] sent ok msg_id=%s chat=%s text_len=%d", self._message_id, self.chat_id, len(cleaned))
             return True
         except Exception as exc:
-            logger.warning("hermes_feishu_plugin CardKit streaming error: %s", exc)
-            if not self._message_id:
-                return await original_send_or_edit(self, text, finalize=finalize)
-            else:
-                self._already_sent = True
-                return False
+            logger.warning("[Feishu Streaming] CardKit streaming error: %s", exc)
+            return False
 
     wrapped_send_or_edit.__hermes_feishu_plugin_wrapped__ = True
     stream_consumer.GatewayStreamConsumer._send_or_edit = wrapped_send_or_edit

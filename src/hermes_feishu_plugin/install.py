@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import shutil
 import site
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 GATEWAY_PATCH_FILES = (
     "gateway-reasoning-content.diff",
@@ -65,6 +68,7 @@ def _apply_gateway_patches(plugin_root: Path) -> list[str]:
                         applied.append(f"{gw_dir}: {patch_name} applied (patch fallback)")
                     except Exception:
                         applied.append(f"{gw_dir}: {patch_name} skipped ({result.stderr.strip()[:80]})")
+                        logger.warning("[Feishu Plugin] patch fallback failed for %s: %s", patch_name, result.stderr.strip()[:80])
             except Exception as exc:
                 applied.append(f"{gw_dir}: {patch_name} error: {exc}")
     return applied
