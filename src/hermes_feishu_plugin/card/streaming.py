@@ -541,9 +541,11 @@ overwrite each other.
 """
 
 _reasoning_delta_lock = threading.Lock()
+# Global map: AIAgent id(self) -> GatewayStreamConsumer
+_agent_consumer_map: dict[int, Any] = {}
 
 
-def _handle_reasoning_delta(reasoning_text: str) -> None:
+def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) -> None:
     """Thread-safe handler for reasoning deltas from the agent worker thread.
 
     Accumulates reasoning text and streams it into the CardKit thinking panel
@@ -552,13 +554,23 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
     text token), eagerly creates the card so the thinking panel can stream.
     Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
     is unavailable (IM patch mode).
+
+    agent_id is the id() of the AIAgent instance. When provided, we look up
+    the consumer via the agent map. Falls back to the legacy thread-ident map
+    for backward compatibility with non-hooked callers.
     """
-    logger.info("[Feishu Streaming] _handle_reasoning_delta called: len=%d", len(reasoning_text or ""))
-    # Get consumer from thread map (worker thread id -> consumer)
-    thread_key = threading.current_thread().ident
-    consumer = _thread_consumer_map.get(thread_key)
+    logger.info("[Feishu Streaming] _handle_reasoning_delta called: len=%d agent_id=%s",
+                 len(reasoning_text or ""), agent_id)
+    # Try agent-id map first (the correct path for hooked _fire_reasoning_delta)
+    consumer = None
+    if agent_id is not None:
+        consumer = _agent_consumer_map.get(agent_id)
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: agent_id=%s consumer=%s", agent_id, consumer)
+    # Fallback: legacy thread-ident map
     if consumer is None:
-        logger.info("[Feishu Streaming] _handle_reasoning_delta: no consumer for thread %s", thread_key)
+        thread_key = threading.current_thread().ident
+        consumer = _thread_consumer_map.get(thread_key)
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: thread_fallback key=%s consumer=%s", thread_key, consumer)
     if consumer is None or not reasoning_text:
         return
     adapter = getattr(consumer, "adapter", None)
@@ -702,7 +714,7 @@ def patch_streaming_cards() -> bool:
 
             def _patched_fire_reasoning(self: Any, text: str) -> None:
                 _original_fire_reasoning(self, text)
-                _handle_reasoning_delta(text)
+                _handle_reasoning_delta(text, agent_id=id(self))
 
             _run_agent.AIAgent._fire_reasoning_delta = _patched_fire_reasoning
         stream_consumer.GatewayStreamConsumer.__hermes_feishu_reasoning_hooked__ = True
@@ -725,6 +737,10 @@ def patch_streaming_cards() -> bool:
         # multiple chats are streaming concurrently.
         thread_key = threading.current_thread().ident
         _thread_consumer_map[thread_key] = self
+        # Also register by agent id so the hooked _fire_reasoning_delta
+        # (which has no thread context) can find the right consumer.
+        if hasattr(self, "_agent") and self._agent is not None:
+            _agent_consumer_map[id(self._agent)] = self
 
         logger.debug(
             "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",
