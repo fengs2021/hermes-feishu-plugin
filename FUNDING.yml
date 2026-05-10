@@ -1,0 +1,19 @@
+# These are funded supporters via GitHub Sponsors
+# Set up at https://github.com/sponsors/zirflow
+github: []
+
+# GitHub Sponsors (uncomment when set up)
+# sponsor: zirflow
+
+# ko-fi (if you have an account)
+# ko_fi: your-username
+
+# Open Collective (if you have an account)
+# open_collective: zirflow
+
+# 微信/支付宝/其他收款方式（手动填入你的收款二维码链接或 ID）
+custom:
+  - name: 微信
+    url: "https://your-wechat-payment-link.com"  # 替换为你的微信收款链接
+  - name: 支付宝
+    url: "https://your-alipay-link.com"  # 替换为你的支付宝收款链接

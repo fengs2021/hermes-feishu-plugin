@@ -59,7 +59,13 @@ def test_sync_profile_plugin_links_creates_root_and_profile_symlinks(tmp_path, m
         assert (default_link / "plugin.yaml").read_text(encoding="utf-8") == "name: hermes_feishu_plugin\n"
     assert not legacy_link.exists()
     assert not legacy_runtime_plugin.exists()
-    assert (root_plugins / "sitecustomize.py").read_text(encoding="utf-8") == "import hermes_feishu_plugin.startup\n"
+    # The startup line should contain the dynamically-resolved repo src path
+    expected = (
+        "import sys, os\n"
+        f"sys.path.insert(0, '{repo_root / 'src'}')\n"
+        "import hermes_feishu_plugin.startup\n"
+    )
+    assert (root_plugins / "sitecustomize.py").read_text(encoding="utf-8") == expected
     assert (tmp_path / "site-packages" / "hermes_feishu_plugin_startup.pth").exists()
     assert (hermes_site_packages / "hermes_feishu_plugin_startup.pth").exists()
 

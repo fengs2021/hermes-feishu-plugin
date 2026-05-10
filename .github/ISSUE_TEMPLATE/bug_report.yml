@@ -1,0 +1,82 @@
+name: 🐛 Bug Report
+description: Report something that isn't working correctly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! 🐛
+
+        Please fill out the details below so we can investigate.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear description of what the bug is
+      placeholder: Describe what happened vs what you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: How to reproduce this bug
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Plugin Version
+      description: Which version of hermes-feishu-plugin-1 are you using?
+      placeholder: "e.g. 0.6.0"
+    validations:
+      required: true
+
+  - type: input
+    id: hermes-version
+    attributes:
+      label: Hermes Agent Version
+      description: Which version of Hermes Agent are you running?
+      placeholder: "e.g. 2026.4.28"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: |
+        Paste any relevant error logs or terminal output here.
+        **Remove any sensitive information first!**
+      placeholder: |
+        [paste logs here - remove API keys and sensitive data]
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and confirmed this is a new bug
+          required: true
+        - label: I am using the latest version of hermes-feishu-plugin-1
+          required: true
+        - label: I have removed all sensitive information from my logs
+          required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Anything else that might be relevant (Python version, OS, Feishu version, etc.)
+      placeholder: Add any other context about the problem here
+    validations:
+      required: false

@@ -286,7 +286,7 @@ def patch_exec_approval_localization() -> bool:
 
             count = resolve_gateway_approval(state["session_key"], choice)
             logger.info("[Feishu] Approval resolved: matched=%r session=%s choice=%s count=%d", matched_key, state["session_key"], choice, count)
-        except Exception as exc:
+        except (ImportError, AttributeError, NameError) as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
 
         await self._update_approval_card(state.get("message_id", ""), label, user_name, choice)

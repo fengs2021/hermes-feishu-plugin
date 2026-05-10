@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from ..channel.runtime_state import (
@@ -101,13 +102,14 @@ async def _ensure_card_created(
     state = get_chat_state(adapter, chat_id)
     if state.card_message_id:
         return state.card_message_id
-    if not reply_to:
-        return None
+    # Note: reply_to may be None for DM (no parent message to reply to).
+    # send_card_reference handles None by creating a new message instead of replying.
     if state.card_create_lock is None:
         state.card_create_lock = asyncio.Lock()
 
     async with state.card_create_lock:
         if state.card_message_id:
+            logger.info("[Feishu Streaming] _ensure_card_created SKIP: already have card_id=%s", state.card_message_id)
             return state.card_message_id
 
         steps = visible_tool_steps(adapter, chat_id)
@@ -126,6 +128,7 @@ async def _ensure_card_created(
         try:
             card_id = await create_card_entity(adapter, initial_card)
             remember_card_entity(adapter, chat_id, card_id)
+            logger.info("[Feishu Streaming] CardKit card created card_id=%s, sending reference to chat=%s", card_id, chat_id)
             response = await send_card_reference(
                 adapter,
                 chat_id=chat_id,
@@ -139,6 +142,7 @@ async def _ensure_card_created(
             if not message_id:
                 raise RuntimeError("send CardKit reference succeeded but no message_id was returned")
             remember_card_message(adapter, chat_id, message_id)
+            logger.info("[Feishu Streaming] CardKit card REGISTERED: msg_id=%s chat=%s", message_id, chat_id)
             state.phase = "streaming"
             state.flush_controller = FlushController(
                 lambda: _perform_answer_flush(adapter, chat_id, expected_generation=expected_generation)
@@ -296,6 +300,8 @@ async def sync_progress_card(
         return None
 
     state = get_chat_state(adapter, chat_id)
+    logger.info("[Feishu Streaming] _ensure_card_created called: chat=%s gen=%d existing_card=%s phase=%s",
+                chat_id, expected_generation, state.card_message_id, state.phase)
     if state.phase in {"completed", "aborted", "terminated"}:
         return None
     reply_to = state.reply_to_message_id or get_reply_to_message_id().strip()
@@ -529,15 +535,30 @@ async def sync_thinking_card(
         logger.warning("hermes_feishu_plugin thinking IM patch failed: %s", exc)
 
 
-_current_feishu_consumer: Any = None
-"""Thread-safe reference to the active Feishu stream consumer.
+_thread_consumer_map: dict[int, Any] = {}
+"""Map from thread identity to the Feishu stream consumer for that thread.
 
-Set by ``wrapped_send_or_edit`` before each sync to the card and cleared
-afterwards so the reasoning-delta handler knows which chat to target.
+Set by ``wrapped_send_or_edit`` when the LLM call starts (async thread),
+read by ``_handle_reasoning_delta`` when the worker thread fires reasoning
+deltas.  Each thread has its own dict slot so concurrent LLM calls don't
+overwrite each other.
 """
 
+_reasoning_delta_lock = threading.Lock()
+# Global map: AIAgent id(self) -> GatewayStreamConsumer
+_agent_consumer_map: dict[int, Any] = {}
 
-def _handle_reasoning_delta(reasoning_text: str) -> None:
+# Pending reasoning buffer: when MiniMax reasoning_content arrives before the
+# GatewayStreamConsumer has registered itself in _agent_consumer_map (i.e. before
+# the first text delta), we buffer the content here keyed by thread_ident.
+# When the consumer finally registers (same thread), wrapped_send_or_edit drains
+# this buffer and uses it to seed the thinking panel.
+# Using thread_ident (not agent_id) because gateway may create different
+# AIAgent instances for the reasoning stream vs the text stream.
+_pending_reasoning_by_thread: dict[int, str] = {}
+
+
+def _handle_reasoning_delta(reasoning_text: str, agent_id: int | None = None) -> None:
     """Thread-safe handler for reasoning deltas from the agent worker thread.
 
     Accumulates reasoning text and streams it into the CardKit thinking panel
@@ -546,27 +567,74 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
     text token), eagerly creates the card so the thinking panel can stream.
     Falls back to a full-card ``sync_thinking_card`` when CardKit streaming
     is unavailable (IM patch mode).
+
+    agent_id is the id() of the AIAgent instance. When provided, we look up
+    the consumer via the agent map. Falls back to the legacy thread-ident map
+    for backward compatibility with non-hooked callers.
     """
-    consumer = _current_feishu_consumer
-    if consumer is None or not reasoning_text:
+    logger.info("[Feishu Streaming] _handle_reasoning_delta called: len=%d agent_id=%s",
+                len(reasoning_text or ""), agent_id)
+    consumer = None
+    if agent_id is not None:
+        consumer = _agent_consumer_map.get(agent_id)
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: agent_id=%s consumer=%s", agent_id, consumer)
+    # Fallback: legacy thread-ident map
+    if consumer is None:
+        thread_key = threading.current_thread().ident
+        consumer = _thread_consumer_map.get(thread_key)
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: thread_fallback key=%s consumer=%s", thread_key, consumer)
+    # consumer is None means reasoning arrived before the first text delta
+    # (MiniMax sends reasoning_content before any text token).
+    # Buffer it per thread so wrapped_send_or_edit (same thread) can drain it.
+    if consumer is None:
+        thread_key = threading.current_thread().ident
+        if reasoning_text:
+            with _reasoning_delta_lock:
+                _pending_reasoning_by_thread[thread_key] = (
+                    _pending_reasoning_by_thread.get(thread_key, "") + reasoning_text
+                )
+            logger.info(
+                "[Feishu Streaming] _handle_reasoning_delta: no consumer yet, "
+                "buffered reasoning for thread=%s (total=%d)",
+                thread_key,
+                len(_pending_reasoning_by_thread.get(thread_key, "")),
+            )
+        return
+    if not reasoning_text:
         return
     adapter = getattr(consumer, "adapter", None)
     chat_id = getattr(consumer, "chat_id", None)
     if not adapter or not chat_id or not is_feishu_adapter(adapter):
+        logger.warning("[Feishu Streaming] _handle_reasoning_delta: not feishu adapter=%s chat_id=%s", adapter, chat_id)
         return
     if not should_stream(adapter, chat_id):
+        logger.warning("[Feishu Streaming] _handle_reasoning_delta: should_stream=False, skipping")
         return
+
+    # Guard: if thinking text is already populated (from either XML-tagged text in
+    # send_or_edit OR from reasoning_content delta), don't re-accumulate from
+    # reasoning_content here — that would double-count MiniMax which sends both.
+    current_thinking = get_thinking_text(adapter, chat_id)
+    if current_thinking:
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: thinking already populated (len=%d), skipping", len(current_thinking))
+        return
+
     try:
-        current = get_thinking_text(adapter, chat_id)
-        new_thinking = current + str(reasoning_text)
+        new_thinking = str(reasoning_text)
         remember_thinking_text(adapter, chat_id, new_thinking)
 
+        # Worker thread has no running event loop, so use get_event_loop()
+        # (safe here since we're scheduling coroutines, not blocking the loop)
         try:
-            loop = asyncio.get_running_loop()
+            loop = asyncio.get_event_loop()
         except RuntimeError:
+            loop = None
+        if loop is None or not loop.is_running():
+            logger.warning("[Feishu Streaming] _handle_reasoning_delta: no event loop")
             return
 
         active_card_id = get_card_id(adapter, chat_id)
+        logger.info("[Feishu Streaming] _handle_reasoning_delta: active_card=%s thinking_len=%d", active_card_id, len(new_thinking))
         if active_card_id:
             # Card exists — stream thinking text incrementally
             asyncio.run_coroutine_threadsafe(
@@ -580,10 +648,7 @@ def _handle_reasoning_delta(reasoning_text: str) -> None:
                 loop,
             )
     except Exception as exc:
-        import logging
-        logging.getLogger("hermes_feishu_plugin").warning(
-            "reasoning delta handler error: %s", exc, exc_info=True
-        )
+        logger.warning("reasoning delta handler error: %s", exc, exc_info=True)
 
 
 async def _ensure_card_for_reasoning(
@@ -644,16 +709,13 @@ async def _stream_thinking_to_card(
             await stream_card_content(
                 adapter,
                 card_id=card_id,
-                element_id="thinking_text",
+                element_id=THINKING_ELEMENT_ID,
                 content=display_text,
                 sequence=sequence,
             )
     except Exception as exc:
         # CardKit streaming failed — fall back to full-card update
-        import logging as _log
-        _log.getLogger("hermes_feishu_plugin").warning(
-            "stream_thinking_to_card CardKit streaming failed, falling back to sync: %s", exc
-        )
+        logger.warning("stream_thinking_to_card CardKit streaming failed, falling back to sync: %s", exc)
         try:
             await sync_thinking_card(adapter, chat_id, expected_generation=0)
         except Exception:
@@ -661,22 +723,37 @@ async def _stream_thinking_to_card(
 
 
 def patch_streaming_cards() -> bool:
-    """Patch Hermes stream consumer so Feishu uses CardKit-first streaming."""
+    """Patch GatewayStreamConsumer to use CardKit-first streaming in Feishu."""
     import gateway.stream_consumer as stream_consumer
-
-
-    original_send_or_edit = stream_consumer.GatewayStreamConsumer._send_or_edit
-    original_on_delta = stream_consumer.GatewayStreamConsumer.on_delta
 
     if not getattr(original_on_delta, "__hermes_feishu_plugin_wrapped__", False):
 
-        def wrapped_on_delta(self: Any, text: str | None) -> None:
-            if text is None and is_feishu_adapter(self.adapter):
+        def wrapped_on_delta(self: Any, text: str | None, *, reasoning_content: str | None = None) -> None:
+            # MiniMax sends reasoning_content without text (reasoning_only=True).
+            # Suppressing these would drop all thinking from the stream.
+            if text is None and reasoning_content is None:
                 return
-            return original_on_delta(self, text)
+            return original_on_delta(self, text, reasoning_content=reasoning_content)
 
         wrapped_on_delta.__hermes_feishu_plugin_wrapped__ = True
         stream_consumer.GatewayStreamConsumer.on_delta = wrapped_on_delta
+
+    # Suppress the default _flush_reasoning → send_reasoning_content path.
+    # With CardKit streaming, thinking content is already streamed in real-time
+    # via _handle_reasoning_delta → _stream_thinking_to_card. Sending a
+    # separate reasoning message afterwards creates a duplicate "思考中" card.
+    if not getattr(stream_consumer.GatewayStreamConsumer, "__hermes_feishu_flush_reasoning_patched__", False):
+        _original_flush_reasoning = stream_consumer.GatewayStreamConsumer._flush_reasoning
+
+        async def _patched_flush_reasoning(self: Any) -> None:
+            if is_feishu_adapter(self.adapter) and should_stream(self.adapter, self.chat_id):
+                # CardKit streaming already handled thinking — skip the default
+                # send_reasoning_content path entirely.
+                return
+            return await _original_flush_reasoning(self)
+
+        stream_consumer.GatewayStreamConsumer._flush_reasoning = _patched_flush_reasoning
+        stream_consumer.GatewayStreamConsumer.__hermes_feishu_flush_reasoning_patched__ = True
 
     # Hook agent reasoning stream so DeepSeek / MiniMax reasoning_content
     # deltas flow into the CardKit thinking panel.  The agent fires
@@ -693,7 +770,7 @@ def patch_streaming_cards() -> bool:
 
             def _patched_fire_reasoning(self: Any, text: str) -> None:
                 _original_fire_reasoning(self, text)
-                _handle_reasoning_delta(text)
+                _handle_reasoning_delta(text, agent_id=id(self))
 
             _run_agent.AIAgent._fire_reasoning_delta = _patched_fire_reasoning
         stream_consumer.GatewayStreamConsumer.__hermes_feishu_reasoning_hooked__ = True
@@ -702,7 +779,13 @@ def patch_streaming_cards() -> bool:
         return True
 
     async def wrapped_send_or_edit(self: Any, text: str, *, finalize: bool = False) -> bool:
+        # Reset _has_card for a fresh streaming session (when _message_id is None)
+        if getattr(self, '_message_id', None) is None:
+            self._has_card = False
         cleaned = self._clean_for_display(text)
+        logger.info("[Feishu Streaming] wrapped_send_or_edit ENTRY: chat=%s text_len=%d finalize=%s is_feishu=%s",
+                    getattr(self, 'chat_id', '?'), len(cleaned), finalize,
+                    is_feishu_adapter(self.adapter) if hasattr(self, 'adapter') else 'no_adapter')
         if not cleaned.strip():
             return False
 
@@ -711,13 +794,34 @@ def patch_streaming_cards() -> bool:
         if not should_stream(self.adapter, self.chat_id):
             return await original_send_or_edit(self, text, finalize=finalize)
 
-        global _current_feishu_consumer
-        _current_feishu_consumer = self
+        # Register this consumer in the thread map so the worker thread
+        # (which fires reasoning deltas) can look it up safely even when
+        # multiple chats are streaming concurrently.
+        thread_key = threading.current_thread().ident
+        _thread_consumer_map[thread_key] = self
+        # Also register by agent id so the hooked _fire_reasoning_delta
+        # (which has no thread context) can find the right consumer.
+        if hasattr(self, "_agent") and self._agent is not None:
+            _agent_consumer_map[id(self._agent)] = self
+        # Drain any pending reasoning that arrived before this consumer
+        # registered (MiniMax sends reasoning_content before the first text
+        # delta). Use thread_key since that's what we buffered by.
+        with _reasoning_delta_lock:
+            pending = _pending_reasoning_by_thread.pop(thread_key, "")
+        if pending:
+            logger.info(
+                "[Feishu Streaming] draining pending reasoning for thread=%s len=%d",
+                thread_key, len(pending),
+            )
+            remember_thinking_text(self.adapter, self.chat_id, pending)
 
-
+        logger.debug(
+            "[Feishu Streaming] enter wrapped_send_or_edit chat=%s text_len=%d finalize=%s",
+            self.chat_id, len(text or ""), finalize,
+        )
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
-            self._already_sent = True
+            logger.debug("[Feishu Streaming] gen mismatch, falling back chat=%s", self.chat_id)
             return False
 
         if should_suppress_status_message(cleaned):
@@ -730,7 +834,6 @@ def patch_streaming_cards() -> bool:
                     metadata=self.metadata,
                     expected_generation=expected_generation,
                 )
-            self._already_sent = True
             return True
 
         if cleaned == self._last_sent_text:
@@ -772,9 +875,12 @@ def patch_streaming_cards() -> bool:
                 expected_generation=expected_generation,
             )
             if not message_id:
+                logger.info("[Feishu Streaming] _ensure_card_created returned None, fallback chat=%s", self.chat_id)
                 return await original_send_or_edit(self, text, finalize=finalize)
 
             self._message_id = message_id
+            self._has_card = True
+            logger.info("[Feishu Streaming] card created msg_id=%s chat=%s finalize=%s", message_id, self.chat_id, finalize)
             remember_display_text(self.adapter, self.chat_id, visible_text)
             if finalize or cursor_is_final:
                 if not await _finalize_card(
@@ -784,6 +890,7 @@ def patch_streaming_cards() -> bool:
                     expected_generation=expected_generation,
                     close_card=finalize,
                 ):
+                    logger.warning("[Feishu Streaming] _finalize_card failed, fallback chat=%s", self.chat_id)
                     return await original_send_or_edit(self, text, finalize=finalize)
             else:
                 await _flush_answer(
@@ -799,15 +906,13 @@ def patch_streaming_cards() -> bool:
 
             self._already_sent = True
             self._last_sent_text = cleaned
+            logger.info("[Feishu Streaming] sent ok msg_id=%s chat=%s text_len=%d", self._message_id, self.chat_id, len(cleaned))
             return True
         except Exception as exc:
-            logger.warning("hermes_feishu_plugin CardKit streaming error: %s", exc)
-            if not self._message_id:
-                return await original_send_or_edit(self, text, finalize=finalize)
-            else:
-                self._already_sent = True
-                return False
+            logger.warning("[Feishu Streaming] CardKit streaming error: %s", exc)
+            return False
 
     wrapped_send_or_edit.__hermes_feishu_plugin_wrapped__ = True
     stream_consumer.GatewayStreamConsumer._send_or_edit = wrapped_send_or_edit
+    logger.info("[Feishu Streaming] patch_streaming_cards DONE")
     return True

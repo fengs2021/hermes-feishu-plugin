@@ -123,3 +123,35 @@ def test_show_tool_use_only_after_real_tool_steps() -> None:
     remember_tool_steps(adapter, "chat-1", ["🔎 find *.py"])
 
     assert should_show_tool_use(adapter, "chat-1") is True
+
+
+def test_optimize_markdown_style_converts_atx_headings_to_bold() -> None:
+    """ATX headings (# heading) are not supported by Feishu CardKit; convert to bold."""
+    from hermes_feishu_plugin.card.builder import _optimize_markdown_style
+
+    assert _optimize_markdown_style("# Main Title") == "**Main Title**"
+    assert _optimize_markdown_style("## Sub Title") == "**Sub Title**"
+    assert _optimize_markdown_style("###### Tiny") == "**Tiny**"
+
+
+def test_optimize_markdown_style_preserves_supported_syntax() -> None:
+    """Bold, italic, code, lists, blockquotes, and links are preserved."""
+    from hermes_feishu_plugin.card.builder import _optimize_markdown_style
+
+    assert _optimize_markdown_style("**bold**") == "**bold**"
+    assert _optimize_markdown_style("*italic*") == "*italic*"
+    assert _optimize_markdown_style("`inline code`") == "`inline code`"
+    assert _optimize_markdown_style("- item") == "- item"
+    assert _optimize_markdown_style("1. ordered") == "1. ordered"
+    assert _optimize_markdown_style("> quote") == "> quote"
+    assert _optimize_markdown_style("[link](http://example.com)") == "[link](http://example.com)"
+
+
+def test_optimize_markdown_style_preserves_code_fence_content() -> None:
+    """Content inside fenced code blocks must not be processed for headings."""
+    from hermes_feishu_plugin.card.builder import _optimize_markdown_style
+
+    input_text = "Some text\n```\n# This is not a heading\n```\nMore text"
+    result = _optimize_markdown_style(input_text)
+    assert "# This is not a heading" in result  # inside fence, unchanged
+    assert "**" not in result.split("```")[1]  # fence content not converted

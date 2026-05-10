@@ -22,7 +22,11 @@ _ZH_RATE_LIMIT_RE = re.compile(r"^(⚠️|⚠)?\s*主 API 渠道触发限速.*�
 _ZH_EMPTY_RE = re.compile(r"^(⚠️|⚠)?\s*主 API 渠道响应异常.*备用 API 渠道", re.I)
 _ZH_NON_RETRYABLE_RE = re.compile(r"^(⚠️|⚠)?\s*主 API 渠道请求失败.*备用 API 渠道", re.I)
 _ZH_INTERRUPT_RE = re.compile(r"^⚡\s*已收到新消息.*(?:稍后|随后).*回复", re.I)
-_TOOL_PROGRESS_LINE_RE = re.compile(r"^[^\w\s]{1,4}\s+[A-Za-z0-9_.-]+(?:\([^)]*\))?(?::.*|\.\.\.)?$")
+_RUNNING_SUFFIX_RE = re.compile(r"\s*·\s*(?:执行中|Running)\s*$")
+# Pattern for tool progress lines with optional emoji prefix and "· Running/执行中" suffix
+_TOOL_WITH_RUNNING_RE = re.compile(r"^.{1,8}\s+([^\s:]+)\s*[:\"'].*")
+# Fallback: plain tool lines without emoji (used in _looks_like_tool_progress_line and parse)
+_TOOL_PROGRESS_LINE_RE = re.compile(r"^[^\w\s]{1,8}\s+[A-Za-z0-9_.-]+(?:\([^)]*\))?(?::.*|\.\.\.)$")
 
 
 def _looks_like_tool_progress_line(line: str) -> bool:
@@ -52,7 +56,16 @@ def is_tool_progress_block(text: str) -> bool:
 
 
 def parse_tool_progress_lines(text: str) -> list[str]:
-    """Extract readable tool-progress lines from Hermes status text."""
+    """Extract readable tool-progress lines from Hermes status text.
+
+    Handles formats:
+      [tool] <tool_name>: <detail>
+      [done] <tool_name>: <detail>
+      📨 send_message: "..." · 执行中        (running, Hermes native format)
+      💻 terminal: "..."                      (completed or running, Hermes native)
+      🛠️ tool_name: detail...                 (Hermes native)
+      ⏳ Still working...                     (suppressed)
+    """
     parsed: list[str] = []
     for raw_line in str(text or "").splitlines():
         line = raw_line.strip()
@@ -69,11 +82,28 @@ def parse_tool_progress_lines(text: str) -> list[str]:
             or _INVALID_RETRIES_RE.match(line)
         ):
             continue
+
+        # Hermes-native tool progress: emoji prefix + optional "· Running/执行中" suffix
+        # Examples: "📨 send_message: '...'" · 执行中, "💻 terminal: '...'" (no suffix = done)
+        # Skip lines that already have explicit [tool]/[done] prefixes (handled above)
+        tool_match = _TOOL_WITH_RUNNING_RE.match(line)
+        if tool_match:
+            tool_name = tool_match.group(1)
+            has_running_suffix = bool(_RUNNING_SUFFIX_RE.search(line))
+            # Hermes-native format (emoji): only add prefix if line doesn't already have [tool]/[done]
+            has_explicit_prefix = line.startswith("[tool]") or line.startswith("[done]")
+            if not has_explicit_prefix:
+                prefix = "[tool]" if has_running_suffix else "[done]"
+                # Strip the · 执行中 suffix if present, keep the rest as detail
+                detail = _RUNNING_SUFFIX_RE.sub("", line).strip()
+                parsed.append(f"{prefix} {detail}")
+            continue
+
         if line.startswith("[tool]"):
-            parsed.append(line[len("[tool]") :].strip())
+            parsed.append(line[len("[tool]"):].strip())
             continue
         if line.startswith("[done]"):
-            parsed.append(line[len("[done]") :].strip())
+            parsed.append(line[len("[done]"):].strip())
             continue
         if _TOOL_PROGRESS_LINE_RE.match(line):
             parsed.append(line)
