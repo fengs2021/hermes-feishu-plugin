@@ -87,13 +87,15 @@ STARTUP_IMPORT_LINE = "import hermes_feishu_plugin.startup\n"
 def _build_startup_import_line() -> str:
     """Build the startup import line with a dynamically-resolved plugin src path.
 
-    This avoids hardcoding absolute paths so the plugin installs correctly
-    on any machine, not just the developer's.
+    Uses site.addsitedir() instead of sys.path.insert() because Python 3.12's
+    .pth file processing runs each line in a separate exec() context, so
+    sys.path modifications on earlier lines are invisible to later import lines.
+    site.addsitedir() correctly registers the directory in sys.path.
     """
     src_path = str(_resolve_plugin_root() / "src")
     return (
-        "import sys, os\n"
-        f"sys.path.insert(0, '{src_path}')\n"
+        "import sys, site\n"
+        f"site.addsitedir('{src_path}')\n"
         "import hermes_feishu_plugin.startup\n"
     )
 INSTALL_IGNORE_PATTERNS = (
